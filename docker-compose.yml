@@ -41,7 +41,7 @@ services:
       - GITEA__webhook__SKIP_TLS_VERIFY=true
     volumes:
       - gitea_data:/data
-      - ./gitea/custom:/data/gitea/custom:ro   # template overrides + conf
+      - ./gitea/custom:/data/gitea/custom:ro # template overrides + conf
     ports:
       - "${GITEA_HTTP_PORT:-3000}:3000"
       - "${GITEA_SSH_PORT:-2222}:22"
@@ -52,8 +52,8 @@ services:
   # ─── SCADA Sidecar (FastAPI) ───────────────────────────────────────────
   sidecar:
     build:
-      context: ./plugins
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: plugins/Dockerfile
     restart: unless-stopped
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-scada}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-scada_studio}
