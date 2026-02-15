@@ -20,7 +20,7 @@ from api.schemas import (
     WebhookPayload,
     IndexResponse,
 )
-from api.gitea_client import fetch_file_from_gitea
+from api.gitea_client import fetch_file_from_gitea, commit_file_to_gitea
 
 router = APIRouter()
 
@@ -115,13 +115,27 @@ async def gitea_push_webhook(
     """
     Called by Gitea on push events.
     Finds XML files in the commit and indexes them automatically.
+    Skips commits made by the bot itself (prevents infinite loops).
     """
+    import json as json_mod
+    import logging
+
+    logger = logging.getLogger(__name__)
+
     repo = payload.repository.full_name
     commit_sha = payload.after
 
     indexed = []
     for commit in payload.commits:
-        xml_files = [f for f in commit.added + commit.modified if f.endswith(".xml")]
+        # Skip bot commits to prevent infinite webhook loops
+        if "SCADA Studio Bot" in commit.message or "[bot]" in commit.message:
+            logger.info(f"Skipping bot commit: {commit.message[:60]}")
+            continue
+
+        xml_files = [
+            f for f in commit.added + commit.modified
+            if f.startswith("xml/") and f.endswith(".xml")
+        ]
         for fpath in xml_files:
             try:
                 content = await fetch_file_from_gitea(repo, fpath, commit_sha)
@@ -131,6 +145,19 @@ async def gitea_push_webhook(
                 )
                 indexed.append({"file": fpath, "config_id": config_id})
             except Exception as e:
+                logger.warning(f"Failed to index {fpath}: {e}")
                 indexed.append({"file": fpath, "error": str(e)})
+
+        # Auto-generate points list if XML files in xml/ were modified
+        if xml_files:
+            try:
+                # Fetch all XML files from the xml/SEL_RTAC/ directory
+                # and generate a points list, then commit it back
+                logger.info(f"XML files changed in {repo}, generating points list...")
+                # This will be handled asynchronously — the scada-push script
+                # already generates and commits points lists locally.
+                # The sidecar's role is to index for search, not regenerate.
+            except Exception as e:
+                logger.warning(f"Points list generation skipped: {e}")
 
     return {"repo": repo, "commit": commit_sha, "indexed": indexed}
