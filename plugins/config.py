@@ -7,6 +7,9 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
+    # Server
+    port: int = 8000
+
     # Database (PostgreSQL + pgvector)
     database_url: str = "postgresql+asyncpg://scada:scada@localhost:5432/scada_studio"
 
