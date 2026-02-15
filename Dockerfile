@@ -32,8 +32,6 @@ COPY --from=frontend-build /app/frontend/dist ./public
 
 # Environment defaults
 ENV NODE_ENV=production
-ENV PORT=4000
 
-EXPOSE 4000
-
+# Railway injects PORT dynamically; do not hardcode EXPOSE
 CMD ["node", "dist/app.js"]
