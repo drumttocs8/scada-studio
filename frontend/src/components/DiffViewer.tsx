@@ -27,8 +27,10 @@ export default function DiffViewer({ diff }: DiffViewerProps) {
         {diff.changes.map((change, i) => (
           <Box
             key={i}
-            sx={{ bgcolor: colors[change.type], px: 1, py: 0.2, borderLeft: change.type !== 'unchanged' ? '3px solid' : 'none',
-              borderColor: change.type === 'added' ? '#4caf50' : change.type === 'removed' ? '#f44336' : 'transparent' }}
+            sx={{
+              bgcolor: colors[change.type], px: 1, py: 0.2, borderLeft: change.type !== 'unchanged' ? '3px solid' : 'none',
+              borderColor: change.type === 'added' ? '#4caf50' : change.type === 'removed' ? '#f44336' : 'transparent'
+            }}
           >
             <span style={{ color: '#888', marginRight: 8, userSelect: 'none' }}>{String(change.lineNumber).padStart(4)}</span>
             <span style={{ color: '#888', marginRight: 4 }}>{prefixes[change.type]}</span>

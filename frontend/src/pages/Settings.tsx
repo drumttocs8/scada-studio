@@ -15,7 +15,7 @@ export default function Settings() {
     settingsApi.getGitea().then((resp) => {
       setUrl(resp.data.url || '');
       setUsername(resp.data.username || '');
-    }).catch(() => {});
+    }).catch(() => { });
   }, []);
 
   const handleSave = async () => {

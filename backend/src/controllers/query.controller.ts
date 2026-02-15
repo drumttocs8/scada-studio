@@ -7,81 +7,81 @@ const CIMGRAPH_API_URL = process.env.CIMGRAPH_API_URL || 'http://cimgraph-api.ra
 const BLAZEGRAPH_URL = process.env.BLAZEGRAPH_URL || 'http://blazegraph.railway.internal:8080/bigdata';
 
 export const queryController = {
-  /** RAG search via n8n webhook. */
-  async search(req: Request, res: Response) {
-    try {
-      const { query, context } = req.body;
-      if (!query) return res.status(400).json({ error: 'query is required' });
-
-      // Try n8n RAG search webhook
-      try {
-        const resp = await axios.post(
-          `${N8N_WEBHOOK_URL}/webhook/rag-search`,
-          { query, context: context || 'scada-studio' },
-          { timeout: 30000 }
-        );
-        return res.json(resp.data);
-      } catch (n8nErr: any) {
-        // Fallback: try CIMGraph API directly
+    /** RAG search via n8n webhook. */
+    async search(req: Request, res: Response) {
         try {
-          const resp = await axios.post(
-            `${CIMGRAPH_API_URL}/query`,
-            { question: query, cim_profile: 'rc4_2021' },
-            { timeout: 30000 }
-          );
-          return res.json({ source: 'cimgraph-api', results: resp.data });
-        } catch (cimErr: any) {
-          return res.json({
-            source: 'local',
-            message: 'External search services unavailable. Query stored for later processing.',
-            query,
-          });
-        }
-      }
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message });
-    }
-  },
+            const { query, context } = req.body;
+            if (!query) return res.status(400).json({ error: 'query is required' });
 
-  /** CIM topology query via Blazegraph SPARQL or CIMGraph API. */
-  async cimTopology(req: Request, res: Response) {
-    try {
-      const { query, sparql } = req.body;
-
-      if (sparql) {
-        // Direct SPARQL query to Blazegraph
-        try {
-          const resp = await axios.post(
-            `${BLAZEGRAPH_URL}/namespace/kb/sparql`,
-            `query=${encodeURIComponent(sparql)}`,
-            {
-              headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-              timeout: 30000,
+            // Try n8n RAG search webhook
+            try {
+                const resp = await axios.post(
+                    `${N8N_WEBHOOK_URL}/webhook/rag-search`,
+                    { query, context: context || 'scada-studio' },
+                    { timeout: 30000 }
+                );
+                return res.json(resp.data);
+            } catch (n8nErr: any) {
+                // Fallback: try CIMGraph API directly
+                try {
+                    const resp = await axios.post(
+                        `${CIMGRAPH_API_URL}/query`,
+                        { question: query, cim_profile: 'rc4_2021' },
+                        { timeout: 30000 }
+                    );
+                    return res.json({ source: 'cimgraph-api', results: resp.data });
+                } catch (cimErr: any) {
+                    return res.json({
+                        source: 'local',
+                        message: 'External search services unavailable. Query stored for later processing.',
+                        query,
+                    });
+                }
             }
-          );
-          return res.json({ source: 'blazegraph', results: resp.data });
         } catch (err: any) {
-          return res.status(502).json({ error: 'Blazegraph unavailable', details: err.message });
+            return res.status(500).json({ error: err.message });
         }
-      }
+    },
 
-      if (query) {
-        // Natural language → SPARQL via CIMGraph API
+    /** CIM topology query via Blazegraph SPARQL or CIMGraph API. */
+    async cimTopology(req: Request, res: Response) {
         try {
-          const resp = await axios.post(
-            `${CIMGRAPH_API_URL}/generate-sparql`,
-            { question: query, cim_profile: 'rc4_2021' },
-            { timeout: 30000 }
-          );
-          return res.json({ source: 'cimgraph-api', sparql: resp.data.sparql, results: resp.data });
-        } catch (err: any) {
-          return res.status(502).json({ error: 'CIMGraph API unavailable', details: err.message });
-        }
-      }
+            const { query, sparql } = req.body;
 
-      return res.status(400).json({ error: 'Provide either "query" (natural language) or "sparql" (SPARQL query)' });
-    } catch (err: any) {
-      return res.status(500).json({ error: err.message });
-    }
-  },
+            if (sparql) {
+                // Direct SPARQL query to Blazegraph
+                try {
+                    const resp = await axios.post(
+                        `${BLAZEGRAPH_URL}/namespace/kb/sparql`,
+                        `query=${encodeURIComponent(sparql)}`,
+                        {
+                            headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+                            timeout: 30000,
+                        }
+                    );
+                    return res.json({ source: 'blazegraph', results: resp.data });
+                } catch (err: any) {
+                    return res.status(502).json({ error: 'Blazegraph unavailable', details: err.message });
+                }
+            }
+
+            if (query) {
+                // Natural language → SPARQL via CIMGraph API
+                try {
+                    const resp = await axios.post(
+                        `${CIMGRAPH_API_URL}/generate-sparql`,
+                        { question: query, cim_profile: 'rc4_2021' },
+                        { timeout: 30000 }
+                    );
+                    return res.json({ source: 'cimgraph-api', sparql: resp.data.sparql, results: resp.data });
+                } catch (err: any) {
+                    return res.status(502).json({ error: 'CIMGraph API unavailable', details: err.message });
+                }
+            }
+
+            return res.status(400).json({ error: 'Provide either "query" (natural language) or "sparql" (SPARQL query)' });
+        } catch (err: any) {
+            return res.status(500).json({ error: err.message });
+        }
+    },
 };
