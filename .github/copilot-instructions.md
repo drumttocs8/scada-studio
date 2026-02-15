@@ -8,8 +8,8 @@
 - [x] Create Gitea custom templates
 - [x] Create DB init scripts
 - [x] Ensure Documentation is Complete
-- [ ] Create and Run Task (docker compose up)
-- [ ] Launch the Project
+- [x] Create and Run Task (docker compose up)
+- [x] Launch the Project
 - [ ] Set up Gitea webhooks for auto-indexing
 - [ ] Test end-to-end with real RTAC XML
 
@@ -23,10 +23,10 @@ Update the copilot-instructions.md file in the .github directory directly as you
 	- Vanilla Gitea (Docker image, independently updatable) for version control
 	- FastAPI sidecar for custom SCADA functionality
 	- RTAC PLG parser adapted for in-memory XML processing via API
-	- PostgreSQL + pgvector for RAG-powered semantic search
+	- PostgreSQL for config/points storage; RAG/embeddings handled by n8n
 	- Automatic indexing via Gitea push webhooks
 	- Custom Gitea templates adding SCADA toolbar + file-view buttons
-	- Similar-config finder using vector cosine similarity
+	- Similar-config finder (text-based; vector search via n8n)
 	- Points list generation (JSON/CSV) from RTAC XML
 	- Integration with n8n, CIMGraph API, and Blazegraph
 	- Deployable on Railway alongside other Verance AI tools
