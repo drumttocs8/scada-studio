@@ -9,7 +9,7 @@ from typing import Optional
 from database import get_db
 from rtac_plg.parser import parse_rtac_xml_bytes, extract_points
 from rag.indexer import index_config
-from rag.search import semantic_search
+from rag.search import text_search
 from similar_configs.finder import find_similar
 from api.schemas import (
     ParseResponse,
@@ -69,8 +69,8 @@ async def search_configs(
     body: SearchRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Semantic search across indexed RTAC configurations."""
-    results = await semantic_search(db, body.query, top_k=body.top_k)
+    """Text search across indexed RTAC configurations."""
+    results = await text_search(db, body.query, top_k=body.top_k)
     return SearchResponse(query=body.query, results=results)
 
 

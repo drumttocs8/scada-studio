@@ -10,36 +10,22 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import get_settings
-
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
-    settings = get_settings()
-
-    # Auto-create tables if they don't exist (runs pgvector CREATE EXTENSION too)
+    # Auto-create tables if they don't exist
     try:
         from database import _get_engine
         from models import Base
-        from sqlalchemy import text
         engine, _ = _get_engine()
         async with engine.begin() as conn:
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await conn.run_sync(Base.metadata.create_all)
         logger.info("Database tables verified / created")
     except Exception as e:
         logger.warning(f"Database migration skipped (will retry on first request): {e}")
-
-    # Lazy-load embedding model in background (don't block startup/healthcheck)
-    try:
-        from rag.embedder import load_embedding_model
-        load_embedding_model(settings.embedding_model)
-        logger.info("Embedding model loaded")
-    except Exception as e:
-        logger.warning(f"Embedding model not loaded (will retry on first request): {e}")
     yield
 
 

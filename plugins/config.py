@@ -17,11 +17,7 @@ class Settings(BaseSettings):
     gitea_url: str = "http://localhost:3000"
     gitea_token: str = ""
 
-    # Embedding model (sentence-transformers)
-    embedding_model: str = "all-MiniLM-L6-v2"
-    embedding_dim: int = 384
-
-    # External Verance services
+    # External Verance services (RAG/embeddings handled by n8n)
     n8n_webhook_url: str = "https://n8n-g8qm-production.up.railway.app"
     cimgraph_api_url: str = "http://cimgraph-api.railway.internal"
     blazegraph_url: str = "http://blazegraph.railway.internal:8080/bigdata"

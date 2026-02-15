@@ -31,7 +31,6 @@ class SearchResult(BaseModel):
     file_path: str
     chunk_text: str
     chunk_type: str
-    score: float
     metadata: dict = {}
 
 
