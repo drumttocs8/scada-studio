@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # When built from repo root (Railway), files are under plugins/
 COPY plugins/requirements.txt .
+
+# Install CPU-only PyTorch first (avoids ~4GB of CUDA libs)
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY plugins/ .
@@ -17,4 +20,4 @@ COPY plugins/ .
 ENV PORT=8000
 EXPOSE ${PORT}
 
-CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT}"
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
