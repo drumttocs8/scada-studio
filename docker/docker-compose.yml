@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: scada_studio
+      POSTGRES_USER: scada
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  gitea:
+    image: gitea/gitea:latest
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=postgres:5432
+      - GITEA__database__NAME=gitea
+      - GITEA__database__USER=scada
+      - GITEA__database__PASSWD=${DB_PASSWORD}
+    volumes:
+      - gitea_data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "3000:3000"
+      - "222:22"
+    depends_on:
+      - postgres
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../docker/backend.Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://scada:${DB_PASSWORD}@postgres:5432/scada_studio
+      - GITEA_URL=http://gitea:3000
+      - JWT_SECRET=${JWT_SECRET}
+    volumes:
+      - git_repos:/app/repos
+    ports:
+      - "4000:4000"
+    depends_on:
+      - postgres
+      - gitea
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/frontend.Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "443:443"
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  postgres_data:
+  gitea_data:
+  git_repos:
