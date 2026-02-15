@@ -1,7 +1,23 @@
+# Dependencies
 node_modules/
+__pycache__/
+*.pyc
+
+# Build
 dist/
+
+# Environment
 .env
+
+# Logs
 *.log
+
+# OS
 .DS_Store
+
+# Data (Docker volumes)
 repos/
 uploads/
+
+# Archive of old React+Express implementation
+_archive/

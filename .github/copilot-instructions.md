@@ -1,11 +1,17 @@
 - [x] Clarify Project Requirements
-- [x] Scaffold the Project
-- [x] Customize the Project
-- [x] Install Required Extensions
-- [x] Compile the Project
-- [ ] Create and Run Task
-- [ ] Launch the Project
+- [x] Scaffold the Project (Gitea + Sidecar + pgvector)
+- [x] Create docker-compose.yml
+- [x] Build sidecar FastAPI service (plugins/)
+- [x] Implement RTAC PLG parser module
+- [x] Implement RAG indexer + search (pgvector)
+- [x] Implement similar-configs finder
+- [x] Create Gitea custom templates
+- [x] Create DB init scripts
 - [x] Ensure Documentation is Complete
+- [ ] Create and Run Task (docker compose up)
+- [ ] Launch the Project
+- [ ] Set up Gitea webhooks for auto-indexing
+- [ ] Test end-to-end with real RTAC XML
 
 Work through each checklist item systematically.
 Update the copilot-instructions.md file in the .github directory directly as you complete each step.
@@ -13,9 +19,14 @@ Update the copilot-instructions.md file in the .github directory directly as you
 ---
 
 **SCADA Studio Project Requirements:**
-- Frontend app to:
-	- Use RTAC PLG to convert .exp files to .xml and parse them
-	- Enable points list generation and general RAG (Retrieval-Augmented Generation) searches
-	- Generate CIM-style topology of data flow
-	- Integrate with Gitea or any local/remote git server for version control
-	- Be tested and deployed in Railway alongside other tools
+- Gitea-based RTAC configuration management platform:
+	- Vanilla Gitea (Docker image, independently updatable) for version control
+	- FastAPI sidecar for custom SCADA functionality
+	- RTAC PLG parser adapted for in-memory XML processing via API
+	- PostgreSQL + pgvector for RAG-powered semantic search
+	- Automatic indexing via Gitea push webhooks
+	- Custom Gitea templates adding SCADA toolbar + file-view buttons
+	- Similar-config finder using vector cosine similarity
+	- Points list generation (JSON/CSV) from RTAC XML
+	- Integration with n8n, CIMGraph API, and Blazegraph
+	- Deployable on Railway alongside other Verance AI tools

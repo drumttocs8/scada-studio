@@ -1,34 +1,25 @@
 # SCADA Studio
 
-Web-based RTAC configuration management tool with points list generation, RAG search, and CIM topology visualization.
-
-## Features
-
-- **RTAC XML Parsing** — Upload RTAC XML exports, extract devices, points, and tag mappings (TypeScript port of [RTAC PLG](../rtac-plg/) parsing engine)
-- **Points List Generation** — Generate structured points lists grouped by server device with source/destination mapping, download as JSON/CSV
-- **Monaco XML Editor** — View and edit RTAC XML configs with syntax highlighting
-- **RAG Search** — Query RTAC configurations via n8n RAG search webhooks
-- **CIM Topology** — Generate CIM-style topology queries via Blazegraph SPARQL and CIMGraph API
-- **XML Diff** — Compare two RTAC XML configurations side-by-side
-- **Gitea Integration** — Connect to Gitea or any compatible Git server for version control
-- **Railway Ready** — Single-container deployment for Railway alongside existing Verance AI tools
+Gitea-based RTAC configuration management platform with RAG-powered search, automatic points list generation, and similar-config finding.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│           SCADA Studio (Railway)            │
-│  ┌─────────────┐  ┌──────────────────────┐  │
-│  │  React UI   │  │   Express Backend    │  │
-│  │  (Vite/MUI) │  │   - RTAC XML Parser  │  │
-│  │             │──│   - Points List Gen  │  │
-│  │  Dashboard  │  │   - Gitea Service    │  │
-│  │  Editor     │  │   - Query Proxy      │  │
-│  │  Query      │  │   - Diff Engine      │  │
-│  │  Diff       │  │                      │  │
-│  │  Settings   │  │                      │  │
-│  └─────────────┘  └──────────┬───────────┘  │
-└──────────────────────────────┼──────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    docker-compose.yml                           │
+│                                                                 │
+│  ┌──────────────┐  ┌──────────────────┐  ┌──────────────────┐  │
+│  │  Gitea        │  │  Sidecar (FastAPI)│  │  PostgreSQL      │  │
+│  │  (vanilla)    │  │                  │  │  + pgvector      │  │
+│  │               │  │  /api/parse      │  │                  │  │
+│  │  Git repos    │──│  /api/search     │──│  rtac_configs    │  │
+│  │  Web UI       │  │  /api/similar    │  │  points          │  │
+│  │  Webhooks  ───│──│  /api/webhook    │  │  embeddings      │  │
+│  │               │  │  /api/index      │  │  (vector search) │  │
+│  │  Custom       │  │                  │  │                  │  │
+│  │  templates ───│──│  RTAC PLG parser │  │                  │  │
+│  └──────────────┘  └──────────────────┘  └──────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
                                │
          ┌─────────────────────┼─────────────────────┐
          ▼                     ▼                     ▼
@@ -38,59 +29,132 @@ Web-based RTAC configuration management tool with points list generation, RAG se
 └─────────────────┘  └─────────────────┘  └─────────────────┘
 ```
 
+### Components
+
+| Component | Role | Image / Build |
+|-----------|------|---------------|
+| **Gitea** | Git server, web UI, webhooks | `gitea/gitea:1.22` (vanilla) |
+| **Sidecar** | RTAC parsing, RAG search, similar-config finder | `./plugins` (FastAPI) |
+| **PostgreSQL** | Shared database for Gitea + SCADA data + vector embeddings | `pgvector/pgvector:pg16` |
+
+### Key Design Decisions
+
+- **Vanilla Gitea** — no fork, no compiled plugins. Gitea stays independently updatable.
+- **Custom templates** — mounted read-only into Gitea to inject SCADA toolbar and buttons on XML file views.
+- **Sidecar pattern** — all custom SCADA logic lives in a separate FastAPI service, called via HTTP from Gitea templates and webhooks.
+- **pgvector** — PostgreSQL extension for vector similarity search, enabling RAG without an external vector DB.
+
 ## Quick Start
 
-### Local Development
-
 ```bash
-# Backend
-cd backend
-npm install
-npm run dev     # → http://localhost:4000
+# 1. Configure
+cp .env.example .env
+# Edit .env with your passwords and tokens
 
-# Frontend (separate terminal)
-cd frontend
-npm install
-npm run dev     # → http://localhost:5173 (proxies /api → :4000)
+# 2. Launch
+docker compose up -d
+
+# 3. Access
+# Gitea:   http://localhost:3000  (first run: create admin account)
+# Sidecar: http://localhost:8000/docs  (FastAPI interactive docs)
 ```
 
-### Railway Deployment
+### First-Time Gitea Setup
 
-1. Push to GitHub
-2. Add service in Railway from repo
-3. Set environment variables (see `.env.example`)
-4. Railway auto-builds via `Dockerfile` + `railway.toml`
+1. Open http://localhost:3000
+2. Complete the installation wizard (database is pre-configured)
+3. Create an admin account
+4. Generate an API token: Settings → Applications → Generate Token
+5. Add the token to `.env` as `GITEA_TOKEN`
+6. Create a webhook on your RTAC config repo:
+   - URL: `http://sidecar:8000/api/webhook/push`
+   - Content type: `application/json`
+   - Events: Push
 
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `4000` | Server port (Railway sets this) |
-| `JWT_SECRET` | `scada-studio-dev-secret` | Auth token signing key |
-| `GITEA_URL` | `http://localhost:3000` | Gitea server URL |
-| `GITEA_TOKEN` | — | Gitea API token |
-| `N8N_WEBHOOK_URL` | `https://n8n-g8qm-production.up.railway.app` | n8n webhook base |
-| `CIMGRAPH_API_URL` | `http://cimgraph-api.railway.internal` | CIMGraph API |
-| `BLAZEGRAPH_URL` | `http://blazegraph.railway.internal:8080/bigdata` | Blazegraph SPARQL |
-
-## API Endpoints
+## API Endpoints (Sidecar)
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Health check |
-| `POST` | `/api/configs/upload` | Upload RTAC XML file |
-| `GET` | `/api/configs` | List uploaded configs |
-| `GET` | `/api/configs/:id` | Get config details (devices, points) |
-| `GET` | `/api/configs/:id/xml` | Get raw XML |
-| `POST` | `/api/configs/:id/generate-points` | Generate points list |
-| `POST` | `/api/query/search` | RAG search |
-| `POST` | `/api/query/cim-topology` | CIM topology query |
-| `POST` | `/api/diff/compare` | Compare two XML files |
-| `GET` | `/api/repos` | List Gitea repositories |
-| `GET/POST` | `/api/settings/gitea` | Gitea connection settings |
+| `POST` | `/api/parse` | Upload RTAC XML → extract devices + points |
+| `POST` | `/api/parse/points-list` | Upload RTAC XML → points list (JSON/CSV) |
+| `POST` | `/api/search` | Semantic search across indexed configs |
+| `POST` | `/api/index` | Parse + index a config for RAG search |
+| `POST` | `/api/similar` | Find similar configurations |
+| `POST` | `/api/webhook/push` | Gitea push webhook (auto-indexes XML files) |
 
-## Tech Stack
+## Project Structure
 
-- **Frontend**: React 18, MUI 5, Monaco Editor, Vite, Zustand, TanStack Query
-- **Backend**: Express 4, TypeScript, fast-xml-parser, simple-git, Axios
-- **Deployment**: Docker (multi-stage), Railway
+```
+scada-studio/
+├── docker-compose.yml          # Gitea + Postgres/pgvector + Sidecar
+├── .env.example                # Environment variable template
+│
+├── gitea/                      # Gitea customization (no source code)
+│   └── custom/                 # Mounted into Gitea container
+│       ├── templates/custom/   # UI overrides
+│       │   ├── header.tmpl     # SCADA toolbar
+│       │   └── extra_links.tmpl # File-view buttons
+│       └── conf/
+│           └── app.ini         # Gitea config overrides
+│
+├── plugins/                    # Sidecar service (FastAPI)
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── main.py                 # App entry point
+│   ├── config.py               # Settings (pydantic-settings)
+│   ├── database.py             # Async SQLAlchemy engine
+│   ├── models.py               # ORM models
+│   ├── api/                    # REST endpoints
+│   │   ├── routes.py
+│   │   ├── schemas.py
+│   │   └── gitea_client.py
+│   ├── rtac_plg/               # RTAC config parsing
+│   │   ├── parser.py           # XML → devices + points
+│   │   └── points_list.py      # Points list generation
+│   ├── rag/                    # RAG search
+│   │   ├── embedder.py         # Sentence-transformer embeddings
+│   │   ├── indexer.py          # Parse → chunk → embed → store
+│   │   └── search.py           # pgvector similarity search
+│   └── similar_configs/
+│       └── finder.py           # Similar config finder
+│
+├── db/
+│   └── init.sql                # pgvector extension + schema
+│
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── DEPLOYMENT.md
+│   └── USER_GUIDE.md
+│
+├── _archive/                   # Previous React+Express implementation
+│
+└── railway.toml                # Railway deployment config
+```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POSTGRES_USER` | `scada` | Database user |
+| `POSTGRES_PASSWORD` | — | **Required.** Database password |
+| `POSTGRES_DB` | `scada_studio` | SCADA Studio database name |
+| `GITEA_VERSION` | `1.22` | Gitea Docker image tag |
+| `GITEA_ROOT_URL` | `http://localhost:3000` | Gitea external URL |
+| `GITEA_TOKEN` | — | Gitea API token (for sidecar) |
+| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence-transformer model |
+| `N8N_WEBHOOK_URL` | `https://n8n-g8qm-production.up.railway.app` | n8n base URL |
+| `CIMGRAPH_API_URL` | `http://cimgraph-api.railway.internal` | CIMGraph API |
+| `BLAZEGRAPH_URL` | `http://blazegraph.railway.internal:8080/bigdata` | Blazegraph SPARQL |
+
+## Development
+
+```bash
+# Run sidecar locally (without Docker)
+cd plugins
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+
+# Interactive API docs
+open http://localhost:8000/docs
+```

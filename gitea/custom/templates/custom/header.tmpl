@@ -1,0 +1,47 @@
+{{/*
+  Gitea custom header — injects SCADA Studio navigation and sidecar connection.
+  Mounted into Gitea at /data/gitea/custom/templates/custom/header.tmpl
+*/}}
+<style>
+  .scada-toolbar {
+    background: #1a2332;
+    padding: 6px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    border-bottom: 1px solid #2d3748;
+  }
+  .scada-toolbar a {
+    color: #63b3ed;
+    text-decoration: none;
+    padding: 4px 10px;
+    border-radius: 4px;
+    transition: background 0.15s;
+  }
+  .scada-toolbar a:hover {
+    background: #2d3748;
+    color: #90cdf4;
+  }
+  .scada-toolbar .scada-brand {
+    font-weight: 600;
+    color: #e2e8f0;
+    margin-right: 8px;
+  }
+  .scada-toolbar .scada-separator {
+    color: #4a5568;
+  }
+</style>
+
+<div class="scada-toolbar">
+  <span class="scada-brand">⚡ SCADA Studio</span>
+  <span class="scada-separator">|</span>
+  <a href="/scada/search" title="RAG Search across all RTAC configs">🔍 Search</a>
+  <a href="/scada/upload" title="Upload and parse RTAC XML">📄 Parse Config</a>
+  <a href="/scada/similar" title="Find similar configurations">🔗 Similar Configs</a>
+</div>
+
+<script>
+  // SCADA Studio sidecar base URL (same Docker network)
+  window.SCADA_SIDECAR_URL = '{{if .IsSigned}}{{/* Use internal URL if authenticated */}}{{end}}' || '/scada';
+</script>

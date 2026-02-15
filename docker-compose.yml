@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+  # ─── PostgreSQL with pgvector ──────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-scada}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-scada_studio}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scada}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── Gitea (vanilla, updatable) ────────────────────────────────────────
+  gitea:
+    image: gitea/gitea:${GITEA_VERSION:-1.22}
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      # Database
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=postgres:5432
+      - GITEA__database__NAME=${GITEA_DB:-gitea}
+      - GITEA__database__USER=${POSTGRES_USER:-scada}
+      - GITEA__database__PASSWD=${POSTGRES_PASSWORD}
+      # Server
+      - GITEA__server__ROOT_URL=${GITEA_ROOT_URL:-http://localhost:3000}
+      - GITEA__server__DOMAIN=${GITEA_DOMAIN:-localhost}
+      # Webhooks — allow calling the sidecar on the Docker network
+      - GITEA__webhook__ALLOWED_HOST_LIST=private
+      - GITEA__webhook__SKIP_TLS_VERIFY=true
+    volumes:
+      - gitea_data:/data
+      - ./gitea/custom:/data/gitea/custom:ro   # template overrides + conf
+    ports:
+      - "${GITEA_HTTP_PORT:-3000}:3000"
+      - "${GITEA_SSH_PORT:-2222}:22"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ─── SCADA Sidecar (FastAPI) ───────────────────────────────────────────
+  sidecar:
+    build:
+      context: ./plugins
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-scada}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-scada_studio}
+      - GITEA_URL=http://gitea:3000
+      - GITEA_TOKEN=${GITEA_TOKEN}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      # External Verance services (Railway internal networking)
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-https://n8n-g8qm-production.up.railway.app}
+      - CIMGRAPH_API_URL=${CIMGRAPH_API_URL:-http://cimgraph-api.railway.internal}
+      - BLAZEGRAPH_URL=${BLAZEGRAPH_URL:-http://blazegraph.railway.internal:8080/bigdata}
+    ports:
+      - "${SIDECAR_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gitea:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  gitea_data:

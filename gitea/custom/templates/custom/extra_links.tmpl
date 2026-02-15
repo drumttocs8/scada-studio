@@ -1,0 +1,112 @@
+{{/*
+  Extra links injected into Gitea's navigation.
+  Adds "Similar Configs" and "Points List" buttons on XML file views.
+*/}}
+<script>
+(function() {
+  // Only run on file view pages
+  const path = window.location.pathname;
+  const isFileView = document.querySelector('.file-view');
+  if (!isFileView) return;
+
+  // Only add buttons for XML files
+  if (!path.endsWith('.xml')) return;
+
+  // Extract repo and file path from URL
+  // Pattern: /owner/repo/src/branch/main/path/to/file.xml
+  const match = path.match(/^\/([^/]+\/[^/]+)\/(?:src|raw)\/(?:branch|commit)\/([^/]+)\/(.+)$/);
+  if (!match) return;
+
+  const repo = match[1];
+  const ref = match[2];
+  const filePath = match[3];
+
+  // Sidecar URL (configurable via environment)
+  const sidecarUrl = window.SCADA_SIDECAR_URL || 'http://localhost:8000';
+
+  // Create button container
+  const btnContainer = document.createElement('div');
+  btnContainer.style.cssText = 'display:flex; gap:8px; margin:8px 0; padding:0 16px;';
+
+  // Similar Configs button
+  const similarBtn = document.createElement('a');
+  similarBtn.textContent = '🔗 Find Similar Configs';
+  similarBtn.href = '#';
+  similarBtn.className = 'ui basic button mini';
+  similarBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    try {
+      const resp = await fetch(`${sidecarUrl}/api/similar`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: `${repo} ${filePath}`})
+      });
+      const data = await resp.json();
+      alert('Similar configs:\n' + data.results.map(r =>
+        `${r.repo}/${r.file_path} (score: ${r.score.toFixed(3)})`
+      ).join('\n'));
+    } catch (err) {
+      alert('Sidecar not reachable: ' + err.message);
+    }
+  });
+
+  // Generate Points List button
+  const pointsBtn = document.createElement('a');
+  pointsBtn.textContent = '📄 Generate Points List';
+  pointsBtn.href = '#';
+  pointsBtn.className = 'ui basic button mini';
+  pointsBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    try {
+      const rawUrl = `/${repo}/raw/branch/${ref}/${filePath}`;
+      const rawResp = await fetch(rawUrl);
+      const blob = await rawResp.blob();
+
+      const fd = new FormData();
+      fd.append('file', blob, filePath.split('/').pop());
+
+      const resp = await fetch(`${sidecarUrl}/api/parse/points-list?format=json`, {
+        method: 'POST',
+        body: fd
+      });
+      const data = await resp.json();
+      // Open result in new tab as formatted JSON
+      const w = window.open('', '_blank');
+      w.document.write('<pre>' + JSON.stringify(data, null, 2) + '</pre>');
+    } catch (err) {
+      alert('Error generating points list: ' + err.message);
+    }
+  });
+
+  // RAG Search button
+  const searchBtn = document.createElement('a');
+  searchBtn.textContent = '🔍 Search Similar Content';
+  searchBtn.href = '#';
+  searchBtn.className = 'ui basic button mini';
+  searchBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const query = prompt('Search RTAC configs:', filePath);
+    if (!query) return;
+    try {
+      const resp = await fetch(`${sidecarUrl}/api/search`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({query, top_k: 10})
+      });
+      const data = await resp.json();
+      const w = window.open('', '_blank');
+      w.document.write('<pre>' + JSON.stringify(data, null, 2) + '</pre>');
+    } catch (err) {
+      alert('Search error: ' + err.message);
+    }
+  });
+
+  btnContainer.appendChild(similarBtn);
+  btnContainer.appendChild(pointsBtn);
+  btnContainer.appendChild(searchBtn);
+
+  // Insert before the file content
+  const fileHeader = document.querySelector('.file-header') || isFileView;
+  fileHeader.parentNode.insertBefore(btnContainer, fileHeader.nextSibling);
+})();
+</script>
