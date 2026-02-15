@@ -19,6 +19,20 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
     settings = get_settings()
+
+    # Auto-create tables if they don't exist (runs pgvector CREATE EXTENSION too)
+    try:
+        from database import _get_engine
+        from models import Base
+        from sqlalchemy import text
+        engine, _ = _get_engine()
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables verified / created")
+    except Exception as e:
+        logger.warning(f"Database migration skipped (will retry on first request): {e}")
+
     # Lazy-load embedding model in background (don't block startup/healthcheck)
     try:
         from rag.embedder import load_embedding_model
