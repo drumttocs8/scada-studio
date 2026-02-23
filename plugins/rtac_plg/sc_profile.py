@@ -16,6 +16,7 @@ import uuid
 import hashlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
+import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import Element, SubElement, ElementTree, indent, tostring
 
 # ─── Namespace URIs ──────────────────────────────────────────────────────
@@ -290,12 +291,14 @@ class SCProfileBuilder:
 
     def serialize(self) -> bytes:
         """Serialize to CIM RDF/XML bytes."""
+        # Register namespace prefixes so ET uses rdf/cim/md/ver instead of ns0/ns1/…
+        ET.register_namespace("rdf", RDF_NS)
+        ET.register_namespace("cim", CIM_NS)
+        ET.register_namespace("md", MD_NS)
+        ET.register_namespace("ver", VER_NS)
+
         # ── Build the RDF root ──
         root = Element(f"{{{RDF_NS}}}RDF")
-        root.set(f"xmlns:rdf", RDF_NS)
-        root.set(f"xmlns:cim", CIM_NS)
-        root.set(f"xmlns:md", MD_NS)
-        root.set(f"xmlns:ver", VER_NS)
 
         # ── FullModel header ──
         header = SubElement(root, f"{{{MD_NS}}}FullModel")
