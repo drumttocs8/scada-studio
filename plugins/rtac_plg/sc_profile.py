@@ -146,8 +146,7 @@ class SCProfileBuilder:
             mrid_el.text = mrid
 
             type_el = SubElement(rtu, f"{{{CIM_NS}}}RemoteUnit.remoteUnitType")
-            type_enum = SubElement(type_el, f"{{{CIM_NS}}}RemoteUnitType")
-            type_enum.text = "RTU"
+            type_el.set(f"{{{RDF_NS}}}resource", f"{CIM_NS}RemoteUnitType.RTU")
 
             # Verance extension: source file traceability
             if source_file:
