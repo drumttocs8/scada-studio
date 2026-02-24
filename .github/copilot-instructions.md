@@ -11,6 +11,7 @@
 - [x] Create and Run Task (docker compose up)
 - [x] Launch the Project
 - [x] Set up Gitea webhooks for auto-indexing
+- [x] Cross-profile device mapping (schema + API + architecture doc)
 - [ ] Test end-to-end with real RTAC XML
 
 Work through each checklist item systematically.
