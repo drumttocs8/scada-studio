@@ -65,3 +65,38 @@ CREATE INDEX IF NOT EXISTS idx_rtac_configs_repo ON rtac_configs(repo);
 CREATE INDEX IF NOT EXISTS idx_points_config ON points(config_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_config ON embeddings(config_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(chunk_type);
+
+-- ─── Cross-profile device mappings ────────────────────────────────────────
+-- Links equipment across CIM profiles: EQ ↔ SC ↔ PE ↔ CN
+-- Populated by: manual entry, naming-convention matching, or AI inference.
+
+CREATE TABLE IF NOT EXISTS device_mappings (
+    id              SERIAL PRIMARY KEY,
+    substation      TEXT NOT NULL,               -- substation / site name
+    -- EQ profile (Electrical)
+    eq_uri          TEXT,                         -- EQ equipment CIM mRID
+    eq_name         TEXT,                         -- IdentifiedObject.name
+    eq_type         TEXT,                         -- CIM class: Breaker, PowerTransformer, etc.
+    -- SC profile (SCADA / Communications)
+    sc_device_uri   TEXT,                         -- SC RemoteUnit CIM mRID
+    sc_device_name  TEXT,                         -- RemoteUnit name
+    sc_map_name     TEXT,                         -- RTAC map name (from PLG parser)
+    -- PE profile (Protection)
+    pe_relay_uri    TEXT,                         -- PE relay CIM mRID
+    pe_relay_name   TEXT,                         -- relay name
+    -- Tag matching
+    tag_pattern     TEXT,                         -- regex matching SCADA tags for this device
+    -- Provenance
+    confidence      FLOAT DEFAULT 1.0,           -- 1.0 = manual, <1.0 = auto-inferred
+    source          TEXT DEFAULT 'manual',        -- 'manual', 'naming_convention', 'ai_inferred'
+    model_name      TEXT,                         -- Blazegraph model this mapping belongs to
+    config_id       INTEGER REFERENCES rtac_configs(id) ON DELETE SET NULL,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (substation, eq_uri, sc_device_uri)
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_mappings_sub ON device_mappings(substation);
+CREATE INDEX IF NOT EXISTS idx_device_mappings_eq ON device_mappings(eq_uri);
+CREATE INDEX IF NOT EXISTS idx_device_mappings_sc ON device_mappings(sc_device_uri);
+CREATE INDEX IF NOT EXISTS idx_device_mappings_model ON device_mappings(model_name);

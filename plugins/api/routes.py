@@ -19,6 +19,11 @@ from api.schemas import (
     SimilarResponse,
     WebhookPayload,
     IndexResponse,
+    DeviceMappingCreate,
+    DeviceMappingResponse,
+    DeviceMappingListResponse,
+    AutoDetectRequest,
+    AutoDetectResponse,
 )
 from api.gitea_client import fetch_file_from_gitea, commit_file_to_gitea
 
@@ -317,3 +322,146 @@ async def _generate_and_store_sc_profile(
         result["blazegraph_error"] = str(e)
 
     return result
+
+
+# ─── Device Mappings (cross-profile) ─────────────────────────────────────
+
+
+@router.get("/mappings", response_model=DeviceMappingListResponse, tags=["Device Mappings"])
+async def list_mappings(
+    substation: Optional[str] = Query(None, description="Filter by substation"),
+    model_name: Optional[str] = Query(None, description="Filter by Blazegraph model"),
+    db: AsyncSession = Depends(get_db),
+):
+    """List device mappings, optionally filtered by substation or model."""
+    from sqlalchemy import select
+    from models import DeviceMapping
+
+    stmt = select(DeviceMapping)
+    if substation:
+        stmt = stmt.where(DeviceMapping.substation == substation)
+    if model_name:
+        stmt = stmt.where(DeviceMapping.model_name == model_name)
+    stmt = stmt.order_by(DeviceMapping.substation, DeviceMapping.eq_name)
+
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return DeviceMappingListResponse(
+        substation=substation,
+        count=len(rows),
+        mappings=[DeviceMappingResponse.model_validate(r) for r in rows],
+    )
+
+
+@router.post("/mappings", response_model=DeviceMappingResponse, tags=["Device Mappings"])
+async def create_mapping(
+    body: DeviceMappingCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create or update a device mapping (upsert on substation+eq_uri+sc_device_uri)."""
+    from sqlalchemy import select
+    from models import DeviceMapping
+
+    # Check for existing mapping to upsert
+    stmt = select(DeviceMapping).where(
+        DeviceMapping.substation == body.substation,
+        DeviceMapping.eq_uri == body.eq_uri,
+        DeviceMapping.sc_device_uri == body.sc_device_uri,
+    )
+    result = await db.execute(stmt)
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        for field, value in body.model_dump(exclude_unset=True).items():
+            setattr(existing, field, value)
+        mapping = existing
+    else:
+        mapping = DeviceMapping(**body.model_dump())
+        db.add(mapping)
+
+    await db.commit()
+    await db.refresh(mapping)
+    return DeviceMappingResponse.model_validate(mapping)
+
+
+@router.post("/mappings/bulk", response_model=DeviceMappingListResponse, tags=["Device Mappings"])
+async def bulk_create_mappings(
+    mappings: list[DeviceMappingCreate],
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk create/update device mappings."""
+    from models import DeviceMapping
+
+    results = []
+    for body in mappings:
+        mapping = DeviceMapping(**body.model_dump())
+        db.add(mapping)
+        results.append(mapping)
+
+    await db.commit()
+    for m in results:
+        await db.refresh(m)
+
+    return DeviceMappingListResponse(
+        count=len(results),
+        mappings=[DeviceMappingResponse.model_validate(m) for m in results],
+    )
+
+
+@router.delete("/mappings/{mapping_id}", tags=["Device Mappings"])
+async def delete_mapping(
+    mapping_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a device mapping by ID."""
+    from sqlalchemy import select
+    from models import DeviceMapping
+
+    stmt = select(DeviceMapping).where(DeviceMapping.id == mapping_id)
+    result = await db.execute(stmt)
+    mapping = result.scalar_one_or_none()
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+
+    await db.delete(mapping)
+    await db.commit()
+    return {"deleted": mapping_id}
+
+
+@router.get("/mappings/export", tags=["Device Mappings"])
+async def export_mappings(
+    substation: str = Query(..., description="Substation to export"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export all mappings for a substation as JSON (for git storage)."""
+    from sqlalchemy import select
+    from models import DeviceMapping
+    from datetime import datetime, timezone
+
+    stmt = (
+        select(DeviceMapping)
+        .where(DeviceMapping.substation == substation)
+        .order_by(DeviceMapping.eq_name)
+    )
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    return {
+        "substation": substation,
+        "model": rows[0].model_name if rows else None,
+        "mappings": [
+            {
+                "eq_name": r.eq_name,
+                "eq_type": r.eq_type,
+                "eq_uri": r.eq_uri,
+                "sc_device": r.sc_device_name,
+                "sc_map_name": r.sc_map_name,
+                "pe_relay": r.pe_relay_name,
+                "tag_pattern": r.tag_pattern,
+                "confidence": r.confidence,
+                "source": r.source,
+            }
+            for r in rows
+        ],
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+    }
