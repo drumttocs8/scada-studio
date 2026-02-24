@@ -128,11 +128,28 @@ class SCProfileBuilder:
         }
 
     def add_devices(self, devices: List[Dict]) -> None:
-        """Add RTAC server devices as cim:RemoteUnit instances."""
+        """
+        Add RTAC devices as cim:RemoteUnit instances.
+
+        Captures ALL device types — both server devices (SCADA masters the
+        RTAC serves data TO) and client devices (relays/IEDs the RTAC reads
+        FROM).  The ``role`` field distinguishes them:
+        - "server": downstream masters (EMS, SCADA host)
+        - "client": upstream IEDs, relays, meters
+        - "device": unknown role
+
+        The RTAC itself does not appear as a device in the export — it IS
+        the export source.  Call ``set_rtu_identity()`` to add it as the
+        central node.
+        """
         for dev in devices:
             device_name = dev.get("name") or dev.get("device_name", "UnknownDevice")
             map_name = dev.get("map_name", device_name)
             source_file = dev.get("_source_file", "")
+            protocol = dev.get("protocol", "")
+            role = dev.get("role", "device")
+            manufacturer = dev.get("manufacturer", "")
+            model = dev.get("model", "")
 
             mrid = _make_mrid("rtu", self.substation_name, map_name)
 
@@ -145,21 +162,75 @@ class SCProfileBuilder:
             mrid_el = SubElement(rtu, f"{{{CIM_NS}}}IdentifiedObject.mRID")
             mrid_el.text = mrid
 
-            type_el = SubElement(rtu, f"{{{CIM_NS}}}RemoteUnit.remoteUnitType")
-            type_el.set(f"{{{RDF_NS}}}resource", f"{CIM_NS}RemoteUnitType.RTU")
+            # Map role to CIM RemoteUnitType
+            if role == "server":
+                ru_type = "RemoteUnitType.ControlCenter"
+            elif role == "client":
+                ru_type = "RemoteUnitType.IED"
+            else:
+                ru_type = "RemoteUnitType.RTU"
 
-            # Verance extension: source file traceability
+            type_el = SubElement(rtu, f"{{{CIM_NS}}}RemoteUnit.remoteUnitType")
+            type_el.set(f"{{{RDF_NS}}}resource", f"{CIM_NS}{ru_type}")
+
+            # Verance extensions
             if source_file:
                 sf_el = SubElement(rtu, f"{{{VER_NS}}}RemoteUnit.sourceFile")
                 sf_el.text = source_file
 
-            # Verance extension: map name (RTAC-specific)
             if map_name:
                 mn_el = SubElement(rtu, f"{{{VER_NS}}}RemoteUnit.mapName")
                 mn_el.text = map_name
 
+            if protocol:
+                pr_el = SubElement(rtu, f"{{{VER_NS}}}RemoteUnit.protocol")
+                pr_el.text = protocol
+
+            if role:
+                rl_el = SubElement(rtu, f"{{{VER_NS}}}RemoteUnit.role")
+                rl_el.text = role
+
+            if manufacturer:
+                mf_el = SubElement(rtu, f"{{{VER_NS}}}RemoteUnit.manufacturer")
+                mf_el.text = manufacturer
+
+            if model:
+                md_el = SubElement(rtu, f"{{{VER_NS}}}RemoteUnit.model")
+                md_el.text = model
+
             self._remote_units[map_name] = rtu
             self.stats["remote_units"] += 1
+
+    def set_rtu_identity(self, rtu_name: str) -> None:
+        """
+        Add the RTAC itself as the central RemoteUnit node.
+
+        The RTAC doesn't appear as a device in its own export — it IS the
+        export source.  This method creates a special central node that all
+        client devices read from and all server devices receive from.
+
+        Args:
+            rtu_name: The RTU/RTAC identifier (e.g. "ORS1-PPC-R151")
+        """
+        mrid = _make_mrid("rtac", self.substation_name, rtu_name)
+
+        rtu = Element(f"{{{CIM_NS}}}RemoteUnit")
+        rtu.set(f"{{{RDF_NS}}}ID", mrid)
+
+        name_el = SubElement(rtu, f"{{{CIM_NS}}}IdentifiedObject.name")
+        name_el.text = rtu_name
+
+        mrid_el = SubElement(rtu, f"{{{CIM_NS}}}IdentifiedObject.mRID")
+        mrid_el.text = mrid
+
+        type_el = SubElement(rtu, f"{{{CIM_NS}}}RemoteUnit.remoteUnitType")
+        type_el.set(f"{{{RDF_NS}}}resource", f"{CIM_NS}RemoteUnitType.SubstationControlSystem")
+
+        role_el = SubElement(rtu, f"{{{VER_NS}}}RemoteUnit.role")
+        role_el.text = "rtu"
+
+        self._remote_units[f"__rtac__{rtu_name}"] = rtu
+        self.stats["remote_units"] += 1
 
     def add_points(self, points: List[Dict]) -> None:
         """
@@ -368,6 +439,7 @@ def generate_sc_profile(
     devices: List[Dict],
     points: List[Dict],
     substation_name: str,
+    rtu_name: Optional[str] = None,
     eq_model_urn: Optional[str] = None,
     pe_model_urn: Optional[str] = None,
     equipment_mapping: Optional[Dict[str, str]] = None,
@@ -376,9 +448,10 @@ def generate_sc_profile(
     Generate SC profile XML from parsed RTAC data.
 
     Args:
-        devices: Parsed RTAC server devices
+        devices: Parsed RTAC devices (both client and server)
         points: Parsed RTAC points
         substation_name: Name for the substation this profile belongs to
+        rtu_name: RTU/RTAC identifier (e.g. "ORS1-PPC-R151"); added as central node
         eq_model_urn: URN of the dependent EQ profile (optional)
         pe_model_urn: URN of the dependent PE profile (optional)
         equipment_mapping: Dict mapping RTAC tag names → CIM equipment mRIDs
@@ -392,6 +465,8 @@ def generate_sc_profile(
         pe_model_urn=pe_model_urn,
         equipment_mapping=equipment_mapping,
     )
+    if rtu_name:
+        builder.set_rtu_identity(rtu_name)
     builder.add_devices(devices)
     builder.add_points(points)
     return builder.serialize(), builder.get_stats()
