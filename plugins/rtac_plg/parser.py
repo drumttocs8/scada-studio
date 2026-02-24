@@ -86,47 +86,76 @@ def _parse_rtac_taglist(
 
 
 def _parse_device(root: ET.Element, filename: str) -> Tuple[List[Dict], List[Dict]]:
-    """Parse a single Device element."""
+    """Parse a single Device element — captures ALL device types (server + client)."""
     points: List[Dict] = []
-    server_devices: List[Dict] = []
+    devices: List[Dict] = []
 
     device = root.find(".//Device")
     if device is None:
-        return server_devices, points
+        return devices, points
 
     device_name_el = device.find(".//Name")
     device_name = device_name_el.text if device_name_el is not None else filename
 
+    manufacturer_el = device.find(".//Manufacturer")
+    model_el = device.find(".//Model")
+    manufacturer = manufacturer_el.text if manufacturer_el is not None else ""
+    model = model_el.text if model_el is not None else ""
+
     connection = device.find(".//Connection")
+    protocol_str = ""
+    connection_type = ""
+    map_name = ""
+
     if connection is not None:
         protocol_el = connection.find("Protocol")
-        if protocol_el is not None and protocol_el.text == "DNPServer":
-            map_name = ""
-            for row in connection.findall(".//Row"):
-                settings_in_row = row.findall("Setting")
-                if len(settings_in_row) >= 2:
-                    first_col = settings_in_row[0].find("Column")
-                    first_val = settings_in_row[0].find("Value")
-                    if (
-                        first_col is not None
-                        and first_col.text == "Setting"
-                        and first_val is not None
-                        and first_val.text == "Map Name"
-                    ):
-                        second_val = settings_in_row[1].find("Value")
-                        if second_val is not None:
-                            map_name = second_val.text or ""
-                            break
+        conn_type_el = connection.find("ConnectionType")
+        protocol_str = protocol_el.text if protocol_el is not None else ""
+        connection_type = conn_type_el.text if conn_type_el is not None else ""
 
-            if map_name:
-                server_devices.append(
-                    {"name": device_name, "map_name": map_name, "_source_file": filename}
-                )
+        # Determine role from protocol name
+        # DNPServer, ModbusServer → "server" (RTAC serves data TO this device)
+        # DNPClient, SELClient, ModbusClient, IEC61850Client → "client" (RTAC reads FROM this device)
+        if "Server" in protocol_str:
+            role = "server"
+        elif "Client" in protocol_str:
+            role = "client"
+        else:
+            role = "device"
 
-            for taglist in device.findall(".//TagList"):
-                points.extend(_parse_rtac_taglist(taglist, filename, map_name))
+        # Extract Map Name from connection settings (DNPServer devices)
+        for row in connection.findall(".//Row"):
+            settings_in_row = row.findall("Setting")
+            if len(settings_in_row) >= 2:
+                first_col = settings_in_row[0].find("Column")
+                first_val = settings_in_row[0].find("Value")
+                if (
+                    first_col is not None
+                    and first_col.text == "Setting"
+                    and first_val is not None
+                    and first_val.text == "Map Name"
+                ):
+                    second_val = settings_in_row[1].find("Value")
+                    if second_val is not None:
+                        map_name = second_val.text or ""
+                        break
 
-    return server_devices, points
+        devices.append({
+            "name": device_name,
+            "map_name": map_name or device_name,
+            "protocol": protocol_str,
+            "role": role,
+            "connection_type": connection_type,
+            "manufacturer": manufacturer,
+            "model": model,
+            "_source_file": filename,
+        })
+
+        # Parse TagLists in this device
+        for taglist in device.findall(".//TagList"):
+            points.extend(_parse_rtac_taglist(taglist, filename, map_name or device_name))
+
+    return devices, points
 
 
 # ─── Public API ──────────────────────────────────────────────────────────
