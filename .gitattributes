@@ -1,0 +1,30 @@
+# Normalize all text files to LF in the repo, regardless of OS
+* text=auto eol=lf
+
+# Ensure these are always treated as text
+*.py text eol=lf
+*.sql text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.cfg text eol=lf
+*.txt text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+
+# Windows-specific files keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files — do not touch
+*.png binary
+*.jpg binary
+*.ico binary
+*.sqlite binary
+*.db binary
