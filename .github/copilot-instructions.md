@@ -12,7 +12,9 @@
 - [x] Launch the Project
 - [x] Set up Gitea webhooks for auto-indexing
 - [x] Cross-profile device mapping (schema + API + architecture doc)
-- [ ] Test end-to-end with real RTAC XML
+- [x] Test end-to-end with real RTAC XML
+- [x] Extract reference substations from LTDS CGMES (Dunston, Annfield, Blucher)
+- [x] CIM standards registry (multi-version namespace detection + schema)
 
 Work through each checklist item systematically.
 Update the copilot-instructions.md file in the .github directory directly as you complete each step.
