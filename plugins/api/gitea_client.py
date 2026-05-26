@@ -159,19 +159,41 @@ async def list_repos(owner: str | None = None, limit: int = 50) -> list[dict]:
     if settings.gitea_token:
         headers["Authorization"] = f"token {settings.gitea_token}"
 
-    params: dict = {"limit": limit, "page": 1}
+    # Gitea's /repos/search?owner= expects a numeric uid, not a username.
+    # Use /users/{name}/repos; fall back to /orgs/{name}/repos for orgs;
+    # final fallback to /repos/search (all visible repos).
     if owner:
-        # repos/search handles both users and orgs
-        params["owner"] = owner
-    url = f"{settings.gitea_url}/api/v1/repos/search"
+        candidate_urls = [
+            f"{settings.gitea_url}/api/v1/users/{owner}/repos",
+            f"{settings.gitea_url}/api/v1/orgs/{owner}/repos",
+        ]
+    else:
+        candidate_urls = [f"{settings.gitea_url}/api/v1/repos/search"]
 
     out: list[dict] = []
     async with httpx.AsyncClient(timeout=30) as client:
+        url = None
+        for u in candidate_urls:
+            probe = await client.get(u, headers=headers, params={"limit": 1, "page": 1})
+            if probe.status_code == 200:
+                url = u
+                break
+        if url is None:
+            # No working endpoint found; surface the last status
+            probe.raise_for_status()
+            return out
+
+        params: dict = {"limit": limit, "page": 1}
         while True:
             resp = await client.get(url, headers=headers, params=params)
             resp.raise_for_status()
             payload = resp.json()
-            data = payload.get("data", []) if isinstance(payload, dict) else payload
+            # /users/{name}/repos and /orgs/{name}/repos return a list directly;
+            # /repos/search returns {"data": [...]}.
+            if isinstance(payload, dict) and "data" in payload:
+                data = payload.get("data", [])
+            else:
+                data = payload if isinstance(payload, list) else []
             for r in data:
                 out.append({
                     "full_name": r.get("full_name"),
