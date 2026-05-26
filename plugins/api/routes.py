@@ -792,7 +792,7 @@ class RtacRepoIn(BaseModel):
     repo: str = Field(..., description="owner/repo on the configured Gitea instance")
     branch: str = "main"
     substation: Optional[str] = None
-    path_prefix: str = "xml/"
+    path_prefix: str = ""  # empty = scan entire repo for *.xml
     notes: Optional[str] = None
 
 
@@ -838,7 +838,7 @@ async def create_rtac_repo(body: RtacRepoIn, db: AsyncSession = Depends(get_db))
         repo=body.repo,
         branch=body.branch or "main",
         substation=body.substation,
-        path_prefix=body.path_prefix or "xml/",
+        path_prefix=body.path_prefix or "",
         notes=body.notes,
     )
     db.add(row)
