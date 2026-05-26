@@ -954,3 +954,139 @@ async def sync_rtac_repo(
     }
 
 
+# ─── Gitea Discovery (each repo = one substation's RTAC) ─────────────────
+
+@router.get("/gitea/repos", tags=["Gitea Discovery"])
+async def list_gitea_repos(
+    owner: Optional[str] = Query(None, description="Gitea user/org (defaults to configured gitea_owner)"),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    List Gitea repositories for SCADA Mapping. Each repo represents one
+    substation's RTAC configuration.
+
+    Returns repos plus, for each, the latest indexed RtacConfig (if any)
+    so the UI can show which substations have already been parsed.
+    """
+    from api.gitea_client import list_repos
+    from sqlalchemy import select, func
+    from models import RtacConfig
+
+    try:
+        repos = await list_repos(owner=owner or get_settings().gitea_owner, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Gitea unreachable: {e}")
+
+    # Look up most recent indexed config per repo (single query)
+    full_names = [r["full_name"] for r in repos if r.get("full_name")]
+    indexed_map: dict[str, dict] = {}
+    if full_names:
+        latest_subq = (
+            select(
+                RtacConfig.repo,
+                func.max(RtacConfig.parsed_at).label("latest"),
+            )
+            .where(RtacConfig.repo.in_(full_names))
+            .group_by(RtacConfig.repo)
+            .subquery()
+        )
+        rows = (
+            await db.execute(
+                select(RtacConfig).join(
+                    latest_subq,
+                    (RtacConfig.repo == latest_subq.c.repo)
+                    & (RtacConfig.parsed_at == latest_subq.c.latest),
+                )
+            )
+        ).scalars().all()
+        for c in rows:
+            indexed_map[c.repo] = {
+                "config_id": c.id,
+                "file_path": c.file_path,
+                "commit_sha": c.commit_sha,
+                "parsed_at": c.parsed_at.isoformat() if c.parsed_at else None,
+            }
+
+    for r in repos:
+        r["indexed"] = indexed_map.get(r["full_name"])
+
+    return {"owner": owner or get_settings().gitea_owner, "count": len(repos), "repos": repos}
+
+
+@router.post("/gitea/repos/{owner}/{name}/sync", tags=["Gitea Discovery"])
+async def sync_gitea_repo(
+    owner: str,
+    name: str,
+    force: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    On-demand sync for a discovered Gitea repo. Walks the repo recursively
+    for *.xml and indexes each into RtacConfig. No prior registration needed.
+    """
+    import logging
+    from sqlalchemy import select
+    from models import RtacConfig
+    from api.gitea_client import list_repo_files, fetch_file_from_gitea
+
+    logger = logging.getLogger(__name__)
+    full_name = f"{owner}/{name}"
+
+    # Resolve default branch
+    settings = get_settings()
+    headers = {}
+    if settings.gitea_token:
+        headers["Authorization"] = f"token {settings.gitea_token}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        meta = await client.get(f"{settings.gitea_url}/api/v1/repos/{full_name}", headers=headers)
+        if meta.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Repo not found: {full_name}")
+        meta.raise_for_status()
+        branch = meta.json().get("default_branch") or "main"
+
+    try:
+        files = await list_repo_files(full_name, path_prefix="", ref=branch)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Gitea list failed: {e}")
+
+    indexed: list[dict] = []
+    skipped: list[dict] = []
+    errors: list[dict] = []
+    for entry in files:
+        fpath = entry["path"]
+        try:
+            existing = (
+                await db.execute(
+                    select(RtacConfig)
+                    .where(RtacConfig.repo == full_name)
+                    .where(RtacConfig.file_path == fpath)
+                    .where(RtacConfig.commit_sha == entry["sha"])
+                )
+            ).scalar_one_or_none()
+            if existing and not force:
+                skipped.append({"file": fpath, "config_id": existing.id})
+                continue
+            content = await fetch_file_from_gitea(full_name, fpath, ref=branch)
+            cfg_id = await index_config(
+                db,
+                content,
+                repo=full_name,
+                file_path=fpath,
+                commit_sha=entry["sha"],
+                filename=fpath.split("/")[-1],
+            )
+            indexed.append({"file": fpath, "config_id": cfg_id})
+        except Exception as e:
+            logger.warning(f"Sync failed for {full_name}/{fpath}: {e}")
+            errors.append({"file": fpath, "error": str(e)})
+
+    await db.commit()
+    return {
+        "repo": full_name,
+        "branch": branch,
+        "indexed": indexed,
+        "skipped": skipped,
+        "errors": errors,
+        "summary": {"indexed": len(indexed), "skipped": len(skipped), "errors": len(errors)},
+    }

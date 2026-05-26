@@ -142,3 +142,50 @@ async def list_repo_files(
         out.append({"path": path, "sha": entry.get("sha", ""), "size": entry.get("size", 0)})
     return out
 
+
+async def list_repos(owner: str | None = None, limit: int = 50) -> list[dict]:
+    """
+    List Gitea repositories.
+
+    If `owner` is provided, returns repos for that user or organization
+    (each repo is treated as one substation in SCADA Mapping). Otherwise
+    returns all repos visible to the configured token.
+
+    Returns list of {"full_name", "name", "owner", "default_branch",
+                     "description", "updated_at"}.
+    """
+    settings = get_settings()
+    headers = {}
+    if settings.gitea_token:
+        headers["Authorization"] = f"token {settings.gitea_token}"
+
+    params: dict = {"limit": limit, "page": 1}
+    if owner:
+        # repos/search handles both users and orgs
+        params["owner"] = owner
+    url = f"{settings.gitea_url}/api/v1/repos/search"
+
+    out: list[dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            resp = await client.get(url, headers=headers, params=params)
+            resp.raise_for_status()
+            payload = resp.json()
+            data = payload.get("data", []) if isinstance(payload, dict) else payload
+            for r in data:
+                out.append({
+                    "full_name": r.get("full_name"),
+                    "name": r.get("name"),
+                    "owner": (r.get("owner") or {}).get("login"),
+                    "default_branch": r.get("default_branch") or "main",
+                    "description": r.get("description") or "",
+                    "updated_at": r.get("updated_at"),
+                    "html_url": r.get("html_url"),
+                })
+            if len(data) < limit:
+                break
+            params["page"] += 1
+            if params["page"] > 20:  # hard safety
+                break
+    return out
+
