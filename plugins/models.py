@@ -82,3 +82,19 @@ class DeviceMapping(Base):
     __table_args__ = (
         UniqueConstraint("substation", "eq_uri", "sc_device_uri", name="uq_device_mapping"),
     )
+
+
+class RtacRepo(Base):
+    """A Gitea repository that holds RTAC XML configurations to index."""
+    __tablename__ = "rtac_repos"
+
+    id = Column(Integer, primary_key=True)
+    repo = Column(Text, nullable=False, unique=True)  # "owner/repo"
+    branch = Column(Text, default="main")
+    substation = Column(Text)  # optional default substation tag
+    path_prefix = Column(Text, default="xml/")  # subfolder inside repo to scan
+    notes = Column(Text)
+    last_synced_at = Column(DateTime(timezone=True))
+    last_sync_status = Column(Text)  # "ok" | "error" | None
+    last_sync_message = Column(Text)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

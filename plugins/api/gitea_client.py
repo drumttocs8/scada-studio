@@ -90,3 +90,55 @@ async def commit_file_to_gitea(
         resp.raise_for_status()
         return resp.json()
 
+
+async def list_repo_files(
+    repo: str,
+    path_prefix: str = "",
+    ref: str = "main",
+    extensions: tuple[str, ...] = (".xml",),
+) -> list[dict]:
+    """
+    List files under `path_prefix` (recursively) in a Gitea repo.
+
+    Returns a list of {"path": str, "sha": str, "size": int} entries
+    filtered to the given extensions.
+
+    Uses Gitea's git tree API for recursive listing.
+    """
+    settings = get_settings()
+    # Resolve branch to commit SHA first (git/trees needs a SHA)
+    branch_url = f"{settings.gitea_url}/api/v1/repos/{repo}/branches/{ref}"
+    headers = {}
+    if settings.gitea_token:
+        headers["Authorization"] = f"token {settings.gitea_token}"
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        br = await client.get(branch_url, headers=headers)
+        if br.status_code == 404:
+            # ref may already be a commit sha
+            commit_sha = ref
+        else:
+            br.raise_for_status()
+            commit_sha = br.json().get("commit", {}).get("id", ref)
+
+        tree_url = (
+            f"{settings.gitea_url}/api/v1/repos/{repo}/git/trees/"
+            f"{commit_sha}?recursive=true&per_page=1000"
+        )
+        tr = await client.get(tree_url, headers=headers)
+        tr.raise_for_status()
+        data = tr.json()
+
+    out: list[dict] = []
+    prefix = (path_prefix or "").lstrip("/")
+    for entry in data.get("tree", []):
+        if entry.get("type") != "blob":
+            continue
+        path = entry.get("path", "")
+        if prefix and not path.startswith(prefix):
+            continue
+        if extensions and not path.lower().endswith(extensions):
+            continue
+        out.append({"path": path, "sha": entry.get("sha", ""), "size": entry.get("size", 0)})
+    return out
+

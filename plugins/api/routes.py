@@ -5,6 +5,7 @@ API routes — ties together all plugin modules.
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
+from pydantic import BaseModel, Field
 
 from database import get_db
 from rtac_plg.parser import parse_rtac_xml_bytes, extract_points
@@ -465,3 +466,491 @@ async def export_mappings(
         ],
         "exported_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ─── LLM-facing config Q&A API ───────────────────────────────────────────
+#
+# These endpoints expose indexed RTAC configurations in an LLM-friendly form.
+# Designed to be called from n8n HTTP Request nodes (or any tool-calling
+# runtime) so an engineer can ask questions about RTAC configs and get
+# grounded answers with Gitea citations.
+#
+# Tool manifest: GET /api/llm/tools.json (OpenAI-style function definitions).
+
+
+def _gitea_blob_url(repo: str, file_path: str, commit_sha: str | None = None) -> str:
+    """Build a Gitea blob URL for citation."""
+    from config import get_settings
+    base = get_settings().gitea_url.rstrip("/")
+    ref = commit_sha if commit_sha and commit_sha != "manual" else "main"
+    return f"{base}/{repo}/src/commit/{ref}/{file_path}"
+
+
+def _config_summary(c, include_devices: bool = False) -> dict:
+    """Compact summary of an RtacConfig row for LLM consumption."""
+    meta = c.metadata_ or {}
+    out = {
+        "config_id": c.id,
+        "repo": c.repo,
+        "file_path": c.file_path,
+        "commit_sha": c.commit_sha,
+        "substation": meta.get("substation"),
+        "host_device": c.device_name,
+        "device_count": meta.get("device_count", 0),
+        "point_count": meta.get("point_count", 0),
+        "server_count": meta.get("server_count", 0),
+        "client_count": meta.get("client_count", 0),
+        "gitea_url": _gitea_blob_url(c.repo, c.file_path, c.commit_sha),
+    }
+    if include_devices:
+        out["devices"] = meta.get("devices", [])
+    return out
+
+
+@router.get("/configs", tags=["LLM API"])
+async def list_configs(
+    substation: Optional[str] = Query(None, description="Filter by substation"),
+    repo: Optional[str] = Query(None, description="Filter by Gitea repo (owner/name)"),
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """List indexed RTAC configurations (latest commit per file).
+
+    LLM-friendly summary including substation, device/point counts, and
+    a clickable Gitea URL for citation.
+    """
+    from sqlalchemy import select, func
+    from models import RtacConfig
+
+    # Latest commit per (repo, file_path)
+    latest_subq = (
+        select(
+            RtacConfig.repo,
+            RtacConfig.file_path,
+            func.max(RtacConfig.parsed_at).label("latest"),
+        )
+        .group_by(RtacConfig.repo, RtacConfig.file_path)
+        .subquery()
+    )
+    stmt = (
+        select(RtacConfig)
+        .join(
+            latest_subq,
+            (RtacConfig.repo == latest_subq.c.repo)
+            & (RtacConfig.file_path == latest_subq.c.file_path)
+            & (RtacConfig.parsed_at == latest_subq.c.latest),
+        )
+        .order_by(RtacConfig.parsed_at.desc())
+        .limit(limit)
+    )
+    if repo:
+        stmt = stmt.where(RtacConfig.repo == repo)
+
+    rows = (await db.execute(stmt)).scalars().all()
+    items = [_config_summary(c) for c in rows]
+    if substation:
+        items = [c for c in items if (c.get("substation") or "").lower() == substation.lower()]
+    return {"count": len(items), "configs": items}
+
+
+@router.get("/configs/{config_id}", tags=["LLM API"])
+async def get_config(
+    config_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Detailed parsed view of a single config: devices, points, citations."""
+    from sqlalchemy import select
+    from models import RtacConfig, Point
+
+    cfg = (await db.execute(
+        select(RtacConfig).where(RtacConfig.id == config_id)
+    )).scalar_one_or_none()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="config not found")
+
+    points = (await db.execute(
+        select(Point).where(Point.config_id == config_id).order_by(Point.name)
+    )).scalars().all()
+
+    summary = _config_summary(cfg, include_devices=True)
+    summary["points"] = [
+        {
+            "name": p.name,
+            "address": p.address,
+            "type": p.point_type,
+            "description": p.description,
+            "source_tag": p.source_tag,
+            "destination_tag": p.destination_tag,
+        }
+        for p in points
+    ]
+    return summary
+
+
+@router.get("/configs/{config_id}/devices", tags=["LLM API"])
+async def get_config_devices(
+    config_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Compact device list for a config (for topology comparison).
+
+    Each device includes: name, map_name, role (server/client), protocol,
+    manufacturer, model, connection_type, and any IP address found in the
+    parsed XML metadata. This is what graph-admin's RTAC validator consumes.
+    """
+    from sqlalchemy import select
+    from models import RtacConfig
+
+    cfg = (await db.execute(
+        select(RtacConfig).where(RtacConfig.id == config_id)
+    )).scalar_one_or_none()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="config not found")
+
+    meta = cfg.metadata_ or {}
+    return {
+        "config_id": cfg.id,
+        "repo": cfg.repo,
+        "file_path": cfg.file_path,
+        "substation": meta.get("substation"),
+        "devices": meta.get("devices", []),
+        "gitea_url": _gitea_blob_url(cfg.repo, cfg.file_path, cfg.commit_sha),
+    }
+
+
+@router.get("/configs/by-path", tags=["LLM API"])
+async def get_config_by_path(
+    repo: str = Query(..., description="owner/repo"),
+    file_path: str = Query(..., description="path inside repo"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Look up the latest indexed config by Gitea repo + path."""
+    from sqlalchemy import select
+    from models import RtacConfig
+
+    stmt = (
+        select(RtacConfig)
+        .where(RtacConfig.repo == repo, RtacConfig.file_path == file_path)
+        .order_by(RtacConfig.parsed_at.desc())
+        .limit(1)
+    )
+    cfg = (await db.execute(stmt)).scalar_one_or_none()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="config not indexed")
+    return _config_summary(cfg, include_devices=True)
+
+
+class AskRequest(BaseModel):
+    question: str = Field(..., min_length=1, description="Natural-language question")
+    substation: Optional[str] = Field(None, description="Restrict to one substation")
+    top_k: int = Field(8, ge=1, le=50)
+
+
+@router.post("/ask", tags=["LLM API"])
+async def ask_rtac(
+    body: AskRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """LLM-friendly Q&A: returns ranked text snippets from RTAC configs
+    with Gitea citations the calling agent can present to the engineer.
+
+    This is a grounding endpoint — it does NOT call an LLM itself. The
+    caller (n8n / Copilot / MCP) is expected to synthesise the final
+    answer from the returned snippets.
+    """
+    results = await text_search(db, body.question, top_k=body.top_k)
+
+    # Hydrate with config metadata for citations
+    from sqlalchemy import select
+    from models import RtacConfig
+
+    config_ids = list({r.config_id for r in results})
+    configs = {}
+    if config_ids:
+        rows = (await db.execute(
+            select(RtacConfig).where(RtacConfig.id.in_(config_ids))
+        )).scalars().all()
+        configs = {c.id: c for c in rows}
+
+    snippets = []
+    for r in results:
+        c = configs.get(r.config_id)
+        if not c:
+            continue
+        meta = c.metadata_ or {}
+        if body.substation and (meta.get("substation") or "").lower() != body.substation.lower():
+            continue
+        snippets.append({
+            "config_id": r.config_id,
+            "repo": r.repo,
+            "file_path": r.file_path,
+            "substation": meta.get("substation"),
+            "chunk_type": r.chunk_type,
+            "snippet": r.chunk_text,
+            "citation_url": _gitea_blob_url(c.repo, c.file_path, c.commit_sha),
+        })
+
+    return {
+        "question": body.question,
+        "snippet_count": len(snippets),
+        "snippets": snippets,
+    }
+
+
+@router.get("/llm/tools.json", tags=["LLM API"])
+async def llm_tool_manifest():
+    """OpenAI-style function-calling manifest for the RTAC config API.
+
+    Drop this into an n8n AI Agent node (or any tool-calling runtime)
+    to expose RTAC config Q&A to the model.
+    """
+    return {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "rtac_list_configs",
+                    "description": (
+                        "List RTAC configurations indexed in SCADA Studio. "
+                        "Use this first to discover which substations and files exist."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "substation": {"type": "string"},
+                            "repo": {"type": "string"},
+                        },
+                    },
+                    "http": {"method": "GET", "path": "/api/configs"},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "rtac_get_config",
+                    "description": (
+                        "Get the full parsed view of a single RTAC config: "
+                        "devices (server + client roles), all points, and the "
+                        "Gitea blob URL for citation."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "config_id": {"type": "integer"},
+                        },
+                        "required": ["config_id"],
+                    },
+                    "http": {"method": "GET", "path": "/api/configs/{config_id}"},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "rtac_get_devices",
+                    "description": (
+                        "Get just the device list for a config — server "
+                        "devices (DNPServer/ModbusServer/...) and client "
+                        "devices (relays, meters, ...) with manufacturer "
+                        "and model. Use for topology questions."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"config_id": {"type": "integer"}},
+                        "required": ["config_id"],
+                    },
+                    "http": {"method": "GET", "path": "/api/configs/{config_id}/devices"},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "rtac_ask",
+                    "description": (
+                        "Ask a natural-language question about RTAC configs. "
+                        "Returns ranked text snippets with Gitea citations. "
+                        "Synthesise the final answer from these snippets."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "substation": {"type": "string"},
+                            "top_k": {"type": "integer", "default": 8},
+                        },
+                        "required": ["question"],
+                    },
+                    "http": {"method": "POST", "path": "/api/ask"},
+                },
+            },
+        ]
+    }
+
+
+# ─── RTAC Repositories (Gitea) ───────────────────────────────────────────
+
+class RtacRepoIn(BaseModel):
+    repo: str = Field(..., description="owner/repo on the configured Gitea instance")
+    branch: str = "main"
+    substation: Optional[str] = None
+    path_prefix: str = "xml/"
+    notes: Optional[str] = None
+
+
+@router.get("/repos", tags=["RTAC Repos"])
+async def list_rtac_repos(db: AsyncSession = Depends(get_db)):
+    """List registered RTAC repositories."""
+    from sqlalchemy import select
+    from models import RtacRepo
+
+    rows = (await db.execute(select(RtacRepo).order_by(RtacRepo.id.desc()))).scalars().all()
+    return {
+        "repos": [
+            {
+                "id": r.id,
+                "repo": r.repo,
+                "branch": r.branch,
+                "substation": r.substation,
+                "path_prefix": r.path_prefix,
+                "notes": r.notes,
+                "last_synced_at": r.last_synced_at.isoformat() if r.last_synced_at else None,
+                "last_sync_status": r.last_sync_status,
+                "last_sync_message": r.last_sync_message,
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.post("/repos", tags=["RTAC Repos"])
+async def create_rtac_repo(body: RtacRepoIn, db: AsyncSession = Depends(get_db)):
+    """Register an RTAC repository. Does not sync — call POST /repos/{id}/sync."""
+    from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
+    from models import RtacRepo
+
+    existing = (
+        await db.execute(select(RtacRepo).where(RtacRepo.repo == body.repo))
+    ).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Repo already registered: {body.repo}")
+
+    row = RtacRepo(
+        repo=body.repo,
+        branch=body.branch or "main",
+        substation=body.substation,
+        path_prefix=body.path_prefix or "xml/",
+        notes=body.notes,
+    )
+    db.add(row)
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=str(e))
+    await db.refresh(row)
+    return {"id": row.id, "repo": row.repo}
+
+
+@router.delete("/repos/{repo_id}", tags=["RTAC Repos"])
+async def delete_rtac_repo(repo_id: int, db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import select, delete
+    from models import RtacRepo
+
+    row = (
+        await db.execute(select(RtacRepo).where(RtacRepo.id == repo_id))
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Repo not found")
+    await db.execute(delete(RtacRepo).where(RtacRepo.id == repo_id))
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/repos/{repo_id}/sync", tags=["RTAC Repos"])
+async def sync_rtac_repo(
+    repo_id: int,
+    force: bool = Query(False, description="Re-index even if commit_sha matches"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Walk the Gitea repo for *.xml files under `path_prefix` and index each one
+    that hasn't been indexed at its current commit.
+    """
+    import logging
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from models import RtacRepo, RtacConfig
+    from api.gitea_client import list_repo_files, fetch_file_from_gitea
+
+    logger = logging.getLogger(__name__)
+
+    row = (
+        await db.execute(select(RtacRepo).where(RtacRepo.id == repo_id))
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Repo not registered")
+
+    indexed: list[dict] = []
+    skipped: list[dict] = []
+    errors: list[dict] = []
+
+    try:
+        files = await list_repo_files(
+            row.repo, path_prefix=row.path_prefix or "", ref=row.branch or "main"
+        )
+    except Exception as e:
+        row.last_synced_at = datetime.now(timezone.utc)
+        row.last_sync_status = "error"
+        row.last_sync_message = f"Failed to list repo files: {e}"
+        await db.commit()
+        raise HTTPException(status_code=502, detail=f"Gitea list failed: {e}")
+
+    for entry in files:
+        fpath = entry["path"]
+        try:
+            existing = (
+                await db.execute(
+                    select(RtacConfig)
+                    .where(RtacConfig.repo == row.repo)
+                    .where(RtacConfig.file_path == fpath)
+                    .where(RtacConfig.commit_sha == entry["sha"])
+                )
+            ).scalar_one_or_none()
+            if existing and not force:
+                skipped.append({"file": fpath, "config_id": existing.id})
+                continue
+
+            content = await fetch_file_from_gitea(row.repo, fpath, ref=row.branch or "main")
+            cfg_id = await index_config(
+                db,
+                content,
+                repo=row.repo,
+                file_path=fpath,
+                commit_sha=entry["sha"],
+                filename=fpath.split("/")[-1],
+            )
+            indexed.append({"file": fpath, "config_id": cfg_id})
+        except Exception as e:
+            logger.warning(f"Sync failed for {row.repo}/{fpath}: {e}")
+            errors.append({"file": fpath, "error": str(e)})
+
+    row.last_synced_at = datetime.now(timezone.utc)
+    row.last_sync_status = "error" if errors and not indexed else "ok"
+    row.last_sync_message = (
+        f"{len(indexed)} indexed, {len(skipped)} skipped, {len(errors)} errors"
+    )
+    await db.commit()
+
+    return {
+        "repo": row.repo,
+        "indexed": indexed,
+        "skipped": skipped,
+        "errors": errors,
+        "summary": {
+            "indexed": len(indexed),
+            "skipped": len(skipped),
+            "errors": len(errors),
+        },
+    }
+
+

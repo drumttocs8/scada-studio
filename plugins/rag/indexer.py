@@ -38,13 +38,31 @@ async def index_config(
     # Parse XML
     devices, points = parse_rtac_xml_bytes(xml_bytes, filename=filename)
 
-    # Store config record
+    # Derive substation from repo (e.g. "scada/trinity-hills" → "trinity-hills")
+    substation = repo.split("/")[-1] if "/" in repo else repo
+
+    # Identify the RTAC host device (the one acting as both client and server
+    # is usually absent — pick the first server device, else the first device).
+    servers = [d for d in devices if d.get("role") == "server"]
+    clients = [d for d in devices if d.get("role") == "client"]
+    host_name = (
+        devices[0].get("name") if devices else None
+    )
+
+    # Store config record (devices captured in metadata for LLM / validator use)
     config = RtacConfig(
         repo=repo,
         file_path=file_path,
         commit_sha=commit_sha,
-        device_name=devices[0].get("name") if devices else None,
-        metadata_={"device_count": len(devices), "point_count": len(points)},
+        device_name=host_name,
+        metadata_={
+            "substation": substation,
+            "device_count": len(devices),
+            "point_count": len(points),
+            "server_count": len(servers),
+            "client_count": len(clients),
+            "devices": devices,
+        },
     )
     db.add(config)
     await db.flush()  # get config.id
