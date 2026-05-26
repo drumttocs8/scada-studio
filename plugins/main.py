@@ -26,6 +26,13 @@ async def lifespan(app: FastAPI):
         logger.info("Database tables verified / created")
     except Exception as e:
         logger.warning(f"Database migration skipped (will retry on first request): {e}")
+    # Load Gitea connection config (DB → runtime cache; falls back to env)
+    try:
+        from api.gitea_client import refresh_gitea_cache
+        cfg = await refresh_gitea_cache()
+        logger.info(f"Gitea config loaded: url={cfg.get('url')} owner={cfg.get('owner')} token_set={bool(cfg.get('token'))}")
+    except Exception as e:
+        logger.warning(f"Gitea config cache load skipped: {e}")
     yield
 
 

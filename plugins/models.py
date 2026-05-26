@@ -98,3 +98,17 @@ class RtacRepo(Base):
     last_sync_status = Column(Text)  # "ok" | "error" | None
     last_sync_message = Column(Text)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class GiteaConnection(Base):
+    """Singleton Gitea connection settings (id=1). Overrides env defaults."""
+    __tablename__ = "gitea_connection"
+
+    id = Column(Integer, primary_key=True, default=1)
+    url = Column(Text)  # e.g. http://gitea.railway.internal:3000
+    token = Column(Text)  # personal access token (write-only via API)
+    default_owner = Column(Text)  # optional default user/org filter
+    updated_at = Column(DateTime(timezone=True),
+                        default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+

@@ -1090,3 +1090,89 @@ async def sync_gitea_repo(
         "errors": errors,
         "summary": {"indexed": len(indexed), "skipped": len(skipped), "errors": len(errors)},
     }
+
+
+# ─── Gitea Connection Config ───────────────────────────────────────────────
+class GiteaConfigIn(BaseModel):
+    url: Optional[str] = None
+    token: Optional[str] = None  # "" means clear; None/omitted means leave unchanged
+    default_owner: Optional[str] = None
+
+
+@router.get("/gitea/config", tags=["Gitea Discovery"])
+async def get_gitea_config(db: AsyncSession = Depends(get_db)):
+    """Return current Gitea connection settings (token is never returned in plaintext)."""
+    from models import GiteaConnection
+    from sqlalchemy import select
+    from api.gitea_client import get_effective_gitea
+    from config import get_settings
+
+    row = (await db.execute(select(GiteaConnection).where(GiteaConnection.id == 1))).scalar_one_or_none()
+    eff = get_effective_gitea()
+    s = get_settings()
+    return {
+        "effective": {
+            "url": eff["url"],
+            "owner": eff["owner"],
+            "token_set": bool(eff["token"]),
+        },
+        "stored": {
+            "url": row.url if row else None,
+            "default_owner": row.default_owner if row else None,
+            "token_set": bool(row.token) if row else False,
+            "updated_at": row.updated_at.isoformat() if row and row.updated_at else None,
+        },
+        "env_defaults": {
+            "url": s.gitea_url,
+            "owner": s.gitea_owner,
+            "token_set": bool(s.gitea_token),
+        },
+    }
+
+
+@router.put("/gitea/config", tags=["Gitea Discovery"])
+async def put_gitea_config(body: GiteaConfigIn, db: AsyncSession = Depends(get_db)):
+    """Update stored Gitea connection settings.
+
+    - `url`: set to a value to override env. Pass empty string to clear.
+    - `token`: omit/null to leave unchanged. Empty string clears.
+    - `default_owner`: empty string clears.
+    """
+    from models import GiteaConnection
+    from sqlalchemy import select
+    from api.gitea_client import refresh_gitea_cache
+
+    row = (await db.execute(select(GiteaConnection).where(GiteaConnection.id == 1))).scalar_one_or_none()
+    if row is None:
+        row = GiteaConnection(id=1)
+        db.add(row)
+
+    if body.url is not None:
+        row.url = body.url.strip().rstrip("/") or None
+    if body.token is not None:
+        row.token = body.token or None
+    if body.default_owner is not None:
+        row.default_owner = body.default_owner.strip() or None
+
+    await db.commit()
+    await refresh_gitea_cache()
+    # Return the same shape as GET
+    return await get_gitea_config(db)  # type: ignore[arg-type]
+
+
+@router.post("/gitea/config/test", tags=["Gitea Discovery"])
+async def test_gitea_config(body: GiteaConfigIn | None = None, db: AsyncSession = Depends(get_db)):
+    """Probe the Gitea instance. Body is optional; if provided, those values
+    override the saved/env config for this test only (token left unchanged
+    if omitted)."""
+    from api.gitea_client import get_effective_gitea, test_connection
+
+    cfg = get_effective_gitea()
+    if body is not None:
+        if body.url is not None:
+            cfg["url"] = (body.url.strip().rstrip("/") or "")
+        if body.token is not None:
+            cfg["token"] = body.token or ""
+        if body.default_owner is not None:
+            cfg["owner"] = body.default_owner.strip() or ""
+    return await test_connection(cfg)
