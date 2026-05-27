@@ -1037,15 +1037,23 @@ async def sync_gitea_repo(
     # Resolve default branch using effective Gitea config (DB → env)
     from api.gitea_client import get_effective_gitea
     cfg = get_effective_gitea()
+    if not cfg.get("url"):
+        raise HTTPException(status_code=500, detail="Gitea URL not configured")
     headers = {}
     if cfg.get("token"):
         headers["Authorization"] = f"token {cfg['token']}"
-    async with httpx.AsyncClient(timeout=15) as client:
-        meta = await client.get(f"{cfg['url']}/api/v1/repos/{full_name}", headers=headers)
-        if meta.status_code == 404:
-            raise HTTPException(status_code=404, detail=f"Repo not found: {full_name}")
-        meta.raise_for_status()
-        branch = meta.json().get("default_branch") or "main"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            meta = await client.get(f"{cfg['url']}/api/v1/repos/{full_name}", headers=headers)
+            if meta.status_code == 404:
+                raise HTTPException(status_code=404, detail=f"Repo not found: {full_name}")
+            meta.raise_for_status()
+            branch = meta.json().get("default_branch") or "main"
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Resolve branch failed for {full_name}")
+        raise HTTPException(status_code=502, detail=f"Gitea branch lookup failed: {type(e).__name__}: {e}")
 
     try:
         files = await list_repo_files(full_name, path_prefix="", ref=branch)
@@ -1080,10 +1088,24 @@ async def sync_gitea_repo(
             )
             indexed.append({"file": fpath, "config_id": cfg_id})
         except Exception as e:
-            logger.warning(f"Sync failed for {full_name}/{fpath}: {e}")
-            errors.append({"file": fpath, "error": str(e)})
+            logger.exception(f"Sync failed for {full_name}/{fpath}")
+            errors.append({"file": fpath, "error": f"{type(e).__name__}: {e}"})
+            # Roll back any partial work so the session stays usable for the next file
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as e:
+        logger.exception(f"Final commit failed for {full_name}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        errors.append({"file": "<commit>", "error": f"{type(e).__name__}: {e}"})
+
     return {
         "repo": full_name,
         "branch": branch,
