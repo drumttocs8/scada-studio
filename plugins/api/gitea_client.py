@@ -122,22 +122,41 @@ async def list_repo_files(
     """List files under `path_prefix` (recursively) in a Gitea repo."""
     cfg = get_effective_gitea()
     headers = _auth_headers(cfg)
-    branch_url = f"{cfg['url']}/api/v1/repos/{repo}/branches/{ref}"
+    base = f"{cfg['url']}/api/v1/repos/{repo}"
 
     async with httpx.AsyncClient(timeout=30) as client:
-        br = await client.get(branch_url, headers=headers)
-        if br.status_code == 404:
-            commit_sha = ref
-        else:
-            br.raise_for_status()
-            commit_sha = br.json().get("commit", {}).get("id", ref)
+        # Check repo metadata first so we can return a clear error for empty repos
+        meta = await client.get(base, headers=headers)
+        if meta.status_code == 404:
+            raise RuntimeError(f"Repo not found: {repo}")
+        meta.raise_for_status()
+        meta_json = meta.json()
+        if meta_json.get("empty"):
+            raise RuntimeError(
+                f"Repo {repo} is empty — push at least one commit before syncing."
+            )
+        default_branch = meta_json.get("default_branch") or ref
 
-        tree_url = (
-            f"{cfg['url']}/api/v1/repos/{repo}/git/trees/"
-            f"{commit_sha}?recursive=true&per_page=1000"
-        )
+        # Resolve commit SHA via branch; fall back to using the branch name
+        # directly as the tree ref if Gitea's branches endpoint misbehaves
+        # (older Gitea versions return 500 on empty/just-initialized branches).
+        commit_sha = ref or default_branch
+        try:
+            br = await client.get(f"{base}/branches/{ref or default_branch}", headers=headers)
+            if br.status_code == 200:
+                commit_sha = br.json().get("commit", {}).get("id") or commit_sha
+            elif br.status_code != 404:
+                # Non-404 failure: log via exception text in caller, but keep going with branch name
+                pass
+        except httpx.HTTPError:
+            pass
+
+        tree_url = f"{base}/git/trees/{commit_sha}?recursive=true&per_page=1000"
         tr = await client.get(tree_url, headers=headers)
-        tr.raise_for_status()
+        if tr.status_code >= 400:
+            raise RuntimeError(
+                f"Tree fetch failed ({tr.status_code}) for {repo}@{commit_sha}: {tr.text[:200]}"
+            )
         data = tr.json()
 
     out: list[dict] = []
