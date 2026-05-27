@@ -2,6 +2,7 @@
 API routes — ties together all plugin modules.
 """
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
