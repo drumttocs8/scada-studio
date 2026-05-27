@@ -969,12 +969,13 @@ async def list_gitea_repos(
     Returns repos plus, for each, the latest indexed RtacConfig (if any)
     so the UI can show which substations have already been parsed.
     """
-    from api.gitea_client import list_repos
+    from api.gitea_client import list_repos, get_effective_gitea
     from sqlalchemy import select, func
     from models import RtacConfig
 
+    effective_owner = owner or get_effective_gitea().get("owner") or None
     try:
-        repos = await list_repos(owner=owner or get_settings().gitea_owner, limit=limit)
+        repos = await list_repos(owner=effective_owner, limit=limit)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gitea unreachable: {e}")
 
@@ -1011,7 +1012,7 @@ async def list_gitea_repos(
     for r in repos:
         r["indexed"] = indexed_map.get(r["full_name"])
 
-    return {"owner": owner or get_settings().gitea_owner, "count": len(repos), "repos": repos}
+    return {"owner": effective_owner, "count": len(repos), "repos": repos}
 
 
 @router.post("/gitea/repos/{owner}/{name}/sync", tags=["Gitea Discovery"])
@@ -1033,13 +1034,14 @@ async def sync_gitea_repo(
     logger = logging.getLogger(__name__)
     full_name = f"{owner}/{name}"
 
-    # Resolve default branch
-    settings = get_settings()
+    # Resolve default branch using effective Gitea config (DB → env)
+    from api.gitea_client import get_effective_gitea
+    cfg = get_effective_gitea()
     headers = {}
-    if settings.gitea_token:
-        headers["Authorization"] = f"token {settings.gitea_token}"
+    if cfg.get("token"):
+        headers["Authorization"] = f"token {cfg['token']}"
     async with httpx.AsyncClient(timeout=15) as client:
-        meta = await client.get(f"{settings.gitea_url}/api/v1/repos/{full_name}", headers=headers)
+        meta = await client.get(f"{cfg['url']}/api/v1/repos/{full_name}", headers=headers)
         if meta.status_code == 404:
             raise HTTPException(status_code=404, detail=f"Repo not found: {full_name}")
         meta.raise_for_status()
