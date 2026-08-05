@@ -61,6 +61,10 @@ _RTAC_TO_POINT_TYPE = {
 
 _CONTROL_TYPES = {"operAPC", "operSPC", "APC", "INC", "SPC", "DPC"}
 
+# Public alias — narrative_digest reuses this rather than keeping a fourth
+# copy of the RTAC data-type table.
+RTAC_TO_POINT_TYPE = _RTAC_TO_POINT_TYPE
+
 
 def _deterministic_uuid(namespace: str, *parts: str) -> str:
     """Generate a deterministic UUID from namespace + parts for reproducibility."""

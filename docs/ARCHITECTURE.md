@@ -48,6 +48,27 @@ SCADA Studio uses a **sidecar pattern** alongside vanilla Gitea:
 3. pgvector finds config-level summary chunks with highest cosine similarity
 4. Returns ranked list of similar configs across all repos
 
+### SCADA Design Narrative Generation
+
+1. A zipped RTAC project export is posted to `POST /api/narrative/digest`
+2. `rtac_plg/narrative_digest.py` walks the export and emits a bounded fact
+   base — interfaces and their settings, point inventories, user logic and
+   revision history. Credentials in the export (relay passwords, SNMP
+   community strings, DNP authentication keys) are **redacted at extraction**
+   so the digest is safe to send to an external LLM
+3. Tag Processor rows are resolved into directional signal chains, reusing
+   rtac-plg's rule that a row sourced from an `operAPC`/`operSPC` point is a
+   control being received rather than telemetry being published
+4. `POST /api/narrative/prompts` slices that digest into one self-contained
+   prompt per document section
+5. The caller (an n8n workflow, `SCADA Design Narrative — RTAC Export`) fans
+   the prompts out across LLM calls and concatenates the results
+
+The split exists because a real export is hundreds of megabytes — ORS1's
+SCADA DNP map alone is 27 MB — so raw XML can never reach a context window.
+Bounding is by *relevance*: a point on a large map survives only if the Tag
+Processor or user logic references it.
+
 ### Points List Generation
 
 1. User uploads RTAC XML (or it's fetched from Gitea)

@@ -122,6 +122,77 @@ async def generate_sc_profile_endpoint(
     )
 
 
+# ─── SCADA Design Narrative ─────────────────────────────────────────────
+
+
+class NarrativePromptsRequest(BaseModel):
+    """Prompt-build request. The digest comes from /narrative/digest."""
+
+    digest: dict = Field(..., description="Digest JSON from /narrative/digest")
+    heading_level: int = Field(2, ge=1, le=4, description="Markdown level for section headings")
+    extra_context: Optional[str] = Field(
+        None, description="Site knowledge not present in the export"
+    )
+    only: Optional[list[str]] = Field(
+        None, description="Limit to these section keys; omit for the full document"
+    )
+
+
+@router.post("/narrative/digest", tags=["Design Narrative"])
+async def build_narrative_digest(
+    file: UploadFile = File(..., description="Zipped RTAC project export"),
+    project_name: Optional[str] = Query(None, description="Overrides the export folder name"),
+):
+    """
+    Zipped RTAC export → narrative digest JSON.
+
+    Condenses the whole export (hundreds of files, hundreds of MB) into a
+    bounded fact base: interfaces and their settings, point inventories,
+    resolved signal chains with direction, user logic, and revision history.
+
+    Credentials found in the export — relay passwords, SNMP community
+    strings, DNP authentication keys — are redacted here, so the digest is
+    safe to pass to an external LLM.
+    """
+    from rtac_plg.narrative_digest import build_digest_from_zip
+
+    content = await file.read()
+    try:
+        return build_digest_from_zip(content, project_name)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to build digest: {e}")
+
+
+@router.post("/narrative/prompts", tags=["Design Narrative"])
+async def build_narrative_prompts(body: NarrativePromptsRequest):
+    """
+    Digest → one self-contained LLM prompt per document section.
+
+    Each prompt carries only the slice of the digest its section needs, so a
+    caller can fan them out across parallel completions and concatenate the
+    results in the returned order. The document header is assembled from
+    facts rather than generated.
+    """
+    from rtac_plg.narrative_prompts import build_all_prompts, document_header
+
+    try:
+        prompts = build_all_prompts(
+            body.digest,
+            heading_level=body.heading_level,
+            extra_context=body.extra_context,
+            only=body.only,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to build prompts: {e}")
+
+    return {
+        "project": body.digest.get("project", {}).get("name", ""),
+        "header": document_header(body.digest),
+        "section_count": len(prompts),
+        "sections": prompts,
+    }
+
+
 # ─── RAG Search ──────────────────────────────────────────────────────────
 
 
