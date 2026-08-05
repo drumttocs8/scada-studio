@@ -193,6 +193,48 @@ async def build_narrative_prompts(body: NarrativePromptsRequest):
     }
 
 
+class NarrativeDocxRequest(BaseModel):
+    """Render request for the assembled narrative."""
+
+    markdown: str = Field(..., description="Assembled narrative Markdown, header block included")
+    title: Optional[str] = Field(None, description="Overrides the title parsed from the leading H1")
+    subtitle: Optional[str] = Field(None, description="Overrides the parsed subtitle")
+    filename: Optional[str] = Field(None, description="Download filename, without extension")
+
+
+@router.post("/narrative/docx", tags=["Design Narrative"])
+async def render_narrative_docx_endpoint(body: NarrativeDocxRequest):
+    """
+    Assembled narrative Markdown → formatted Word document.
+
+    The LLM writes Markdown because that is what it is reliably good at and
+    because a plain-text intermediate stays diffable; this renders it for
+    delivery. Tables get repeating shaded header rows, banded body rows and
+    width allocated by content, so a point list that runs several pages stays
+    readable.
+    """
+    from fastapi.responses import Response
+    from rtac_plg.narrative_docx import render_narrative_docx
+
+    try:
+        payload = render_narrative_docx(
+            body.markdown,
+            title=body.title,
+            subtitle=body.subtitle,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Failed to render document: {e}")
+
+    stem = body.filename or (body.title or "SCADA_Design_Narrative").replace(" ", "_")
+    return Response(
+        content=payload,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        headers={"Content-Disposition": f'attachment; filename="{stem}.docx"'},
+    )
+
+
 # ─── RAG Search ──────────────────────────────────────────────────────────
 
 

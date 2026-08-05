@@ -63,6 +63,14 @@ SCADA Studio uses a **sidecar pattern** alongside vanilla Gitea:
    prompt per document section
 5. The caller (an n8n workflow, `SCADA Design Narrative — RTAC Export`) fans
    the prompts out across LLM calls and concatenates the results
+6. `POST /api/narrative/docx` renders the assembled Markdown into a formatted
+   Word document — title page, repeating shaded table headers, banded rows,
+   monospaced code blocks and page numbering
+
+Markdown is the intermediate rather than the deliverable because the model
+writes it reliably and it stays diffable between runs; `.docx` is produced
+only at the end. Rendering uses `python-docx` rather than pandoc so the
+sidecar image needs no system packages.
 
 The split exists because a real export is hundreds of megabytes — ORS1's
 SCADA DNP map alone is 27 MB — so raw XML can never reach a context window.
