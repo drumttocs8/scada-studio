@@ -75,6 +75,14 @@ async def generate_points_list(
 async def generate_sc_profile_endpoint(
     file: UploadFile = File(...),
     substation_name: str = Query(..., description="Substation name for the profile"),
+    rtu_name: Optional[str] = Query(
+        None,
+        description=(
+            "RTAC host identifier. Without it no cim:RemoteUnit is emitted for "
+            "the controller itself, so the graph validator has nothing to match "
+            "the host against and artifacts have no mRID to link to."
+        ),
+    ),
     eq_model_urn: Optional[str] = Query(None, description="URN of the dependent EQ profile"),
     format: str = Query("xml", regex="^(xml|json)$"),
 ):
@@ -82,7 +90,8 @@ async def generate_sc_profile_endpoint(
     Upload RTAC XML → generate SC (SCADA Configuration) CIM profile.
 
     Returns CIM-compliant RDF/XML containing:
-    - cim:RemoteUnit for each RTAC server device
+    - cim:RemoteUnit for the RTAC host (when `rtu_name` is given) and for each
+      device it talks to
     - cim:Analog / cim:Discrete / cim:Accumulator / cim:Control for each point
     - cim:RemoteSource / cim:RemoteControl linking points to RTUs
     - ver:SCADAPoint extensions for DNP3 addresses and tag names
@@ -96,6 +105,7 @@ async def generate_sc_profile_endpoint(
             content,
             filename=file.filename or "upload.xml",
             substation_name=substation_name,
+            rtu_name=rtu_name,
             eq_model_urn=eq_model_urn,
         )
     except Exception as e:
@@ -106,6 +116,7 @@ async def generate_sc_profile_endpoint(
             "substation": substation_name,
             "profile": "SC",
             "model_urn": stats["model_urn"],
+            "rtu_mrid": stats.get("rtu_mrid"),
             "stats": stats,
             "xml_preview": xml_bytes.decode("utf-8")[:2000],
             "xml_size_bytes": len(xml_bytes),
@@ -120,6 +131,30 @@ async def generate_sc_profile_endpoint(
             )
         },
     )
+
+
+@router.get("/scada/rtu-mrid", tags=["CIM Profiles"])
+async def resolve_rtu_mrid(
+    substation_name: str = Query(..., description="Substation the RTAC belongs to"),
+    rtu_name: str = Query(..., description="RTAC host identifier"),
+):
+    """
+    Resolve the SCADA-layer join key for an RTAC host.
+
+    The mRID is deterministic, so any service *could* compute it — but three
+    services reimplementing the same hash is how they quietly drift apart.
+    This endpoint is the single answer: verance-artifact calls it when linking
+    a config, a points list or a generated document to the controller, and
+    verance-graph matches the same value when validating topology.
+    """
+    from rtac_plg.sc_profile import rtu_mrid
+
+    return {
+        "substation_name": substation_name,
+        "rtu_name": rtu_name,
+        "rtu_mrid": rtu_mrid(substation_name, rtu_name),
+        "cim_class": "cim:RemoteUnit",
+    }
 
 
 # ─── SCADA Design Narrative ─────────────────────────────────────────────

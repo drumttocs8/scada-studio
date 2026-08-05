@@ -78,6 +78,23 @@ def _make_mrid(prefix: str, *parts: str) -> str:
     return f"_{prefix}-{uid}"
 
 
+def rtu_mrid(substation_name: str, rtu_name: str) -> str:
+    """
+    The mRID of the RTAC host itself, as a ``cim:RemoteUnit``.
+
+    This is the join key between the SCADA layer and everything else: the
+    graph validator expects the RTAC host to be a ``cim:RemoteUnit``, and
+    verance-artifact links configs, points lists and generated documents to
+    this mRID.
+
+    It is deterministic — the same substation and RTU name always produce the
+    same mRID, on any machine, with no coordination — so a caller can compute
+    the key itself rather than having to ask the graph for one first. Anything
+    that needs the key should call this rather than reimplementing the hash.
+    """
+    return _make_mrid("rtac", substation_name, rtu_name)
+
+
 # ─── RDF/XML Builder ─────────────────────────────────────────────────────
 
 
@@ -112,6 +129,10 @@ class SCProfileBuilder:
         )
         # Maps RTAC tag names/patterns → CIM equipment mRIDs from EQ profile
         self.equipment_mapping = equipment_mapping or {}
+
+        # Set by set_rtu_identity(); the SCADA-layer join key for this export.
+        self.rtu_name: Optional[str] = None
+        self.rtu_mrid: Optional[str] = None
 
         # Collected elements
         self._remote_units: Dict[str, Element] = {}   # map_name → element
@@ -216,7 +237,9 @@ class SCProfileBuilder:
         Args:
             rtu_name: The RTU/RTAC identifier (e.g. "ORS1-PPC-R151")
         """
-        mrid = _make_mrid("rtac", self.substation_name, rtu_name)
+        mrid = rtu_mrid(self.substation_name, rtu_name)
+        self.rtu_name = rtu_name
+        self.rtu_mrid = mrid
 
         rtu = Element(f"{{{CIM_NS}}}RemoteUnit")
         rtu.set(f"{{{RDF_NS}}}ID", mrid)
@@ -433,6 +456,9 @@ class SCProfileBuilder:
             "total_points": total,
             "substation": self.substation_name,
             "model_urn": self.model_urn,
+            # The join key, echoed so callers do not have to recompute it.
+            "rtu_name": self.rtu_name,
+            "rtu_mrid": self.rtu_mrid,
         }
 
 
@@ -480,6 +506,7 @@ def generate_sc_profile_from_bytes(
     xml_bytes: bytes,
     filename: str,
     substation_name: str,
+    rtu_name: Optional[str] = None,
     eq_model_urn: Optional[str] = None,
     equipment_mapping: Optional[Dict[str, str]] = None,
 ) -> Tuple[bytes, Dict]:
@@ -490,6 +517,10 @@ def generate_sc_profile_from_bytes(
         xml_bytes: Raw RTAC XML content
         filename: Original filename
         substation_name: Substation name for the profile
+        rtu_name: RTAC host identifier. Without it no ``cim:RemoteUnit`` is
+            emitted for the controller itself — only for the devices it talks
+            to — and the graph validator has nothing to match the host
+            against.
         eq_model_urn: URN of dependent EQ profile
         equipment_mapping: Tag name → equipment mRID mapping
 
@@ -501,6 +532,7 @@ def generate_sc_profile_from_bytes(
     devices, points = parse_rtac_xml_bytes(xml_bytes, filename=filename)
     return generate_sc_profile(
         devices, points, substation_name,
+        rtu_name=rtu_name,
         eq_model_urn=eq_model_urn,
         equipment_mapping=equipment_mapping,
     )
