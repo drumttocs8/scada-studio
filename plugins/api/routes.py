@@ -1088,6 +1088,14 @@ async def config_for_graph_node(
         "manufacturer": device.get("manufacturer"),
         "model": device.get("model"),
         "connection_type": device.get("connection_type"),
+        # Addressing straight from the RTAC XML, so a caller can answer network
+        # questions the graph has no properties for. address_role says whose
+        # address it is: "device" is the IED itself, "port_server" is a terminal
+        # server shared by many relays, and must not be read as the relay's own.
+        "ip_address": device.get("ip_address"),
+        "address_role": device.get("address_role"),
+        "endpoint": device.get("endpoint"),
+        "network": device.get("network") or {},
         "source_file": device.get("_source_file"),
     }
 

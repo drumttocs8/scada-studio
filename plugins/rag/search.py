@@ -72,17 +72,20 @@ async def text_search(
         needle = query.lower()
         for r in drows:
             for d in (r.meta or {}).get("devices", []):
+                # Addressing is included so network questions ("what is on
+                # 192.168.0.4", "which relay is virtual port 248") hit, since
+                # the graph carries no IP properties to answer them from.
                 blob = " ".join(
                     str(d.get(k, ""))
-                    for k in ("device_name", "map_name", "protocol", "role",
-                              "manufacturer", "model", "connection_type")
-                )
+                    for k in ("device_name", "name", "map_name", "protocol", "role",
+                              "manufacturer", "model", "connection_type", "endpoint")
+                ) + " " + " ".join(f"{k} {v}" for k, v in (d.get("network") or {}).items())
                 if needle not in blob.lower():
                     continue
-                name = d.get("device_name") or d.get("map_name") or "?"
+                name = d.get("device_name") or d.get("name") or d.get("map_name") or "?"
                 desc = ", ".join(
                     f"{k}={d[k]}" for k in
-                    ("role", "protocol", "manufacturer", "model", "connection_type")
+                    ("role", "protocol", "manufacturer", "model", "connection_type", "endpoint")
                     if d.get(k)
                 )
                 results.append(SearchResult(

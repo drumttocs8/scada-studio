@@ -85,6 +85,43 @@ def _parse_rtac_taglist(
     return points
 
 
+# Connection settings worth keeping. Deliberately a whitelist, not a filter:
+# the same block holds "Level 1 Password" / "Level 2 Password" (RTAC-encrypted
+# relay passwords), and those must not end up in the search index or the API.
+_NETWORK_SETTING_KEYS = (
+    "Server IP Address",
+    "Server IP Port",
+    "Virtual Port Number",
+    "Serial Tunneling Mode",
+    "Client IP Addresses",
+    "Transport Protocol",
+    "Server DNP Address",
+    "Client DNP Address",
+    "UDP/IP Response Port",
+    "Event Synch IP Address",
+    "Event Synch IP Port",
+)
+
+
+def _network_settings(connection: ET.Element) -> Dict[str, str]:
+    """Pull the addressing settings out of a device's Connection block."""
+    out: Dict[str, str] = {}
+    for row in connection.findall(".//Row"):
+        name = value = None
+        for s in row.findall("Setting"):
+            col = s.find("Column")
+            val = s.find("Value")
+            if col is None:
+                continue
+            if col.text == "Setting":
+                name = val.text if val is not None else None
+            elif col.text == "Value":
+                value = val.text if val is not None else None
+        if name in _NETWORK_SETTING_KEYS and value not in (None, "", "None"):
+            out[name] = value
+    return out
+
+
 def _parse_device(root: ET.Element, filename: str) -> Tuple[List[Dict], List[Dict]]:
     """Parse a single Device element — captures ALL device types (server + client)."""
     points: List[Dict] = []
@@ -102,7 +139,7 @@ def _parse_device(root: ET.Element, filename: str) -> Tuple[List[Dict], List[Dic
     manufacturer = manufacturer_el.text if manufacturer_el is not None else ""
     model = model_el.text if model_el is not None else ""
 
-    connection = device.find(".//Connection")
+    connection = device.find(".//Connection")  # noqa: F841 (used below)
     protocol_str = ""
     connection_type = ""
     map_name = ""
@@ -140,6 +177,37 @@ def _parse_device(root: ET.Element, filename: str) -> Tuple[List[Dict], List[Dic
                         map_name = second_val.text or ""
                         break
 
+        net = _network_settings(connection)
+
+        # Whose address is it? An SEL client over a Tunneled connection reaches
+        # the relay through a terminal server, so "Server IP Address" is the
+        # port server -- every relay behind it shares that address and is told
+        # apart only by its virtual port. Recording it as the relay's own IP
+        # would make eight relays look like one device at one address.
+        server_ip = net.get("Server IP Address")
+        device_ip = None
+        address_role = None
+        if server_ip:
+            if (connection_type or "").lower() == "tunneled":
+                address_role = "port_server"
+            elif role == "client":
+                device_ip = server_ip
+                address_role = "device"
+            else:
+                address_role = "listener"
+
+        endpoint = None
+        if server_ip:
+            endpoint = server_ip
+            if net.get("Server IP Port"):
+                endpoint += f":{net['Server IP Port']}"
+            if net.get("Virtual Port Number"):
+                endpoint += f" (virtual port {net['Virtual Port Number']})"
+        elif net.get("Server IP Port"):
+            endpoint = f"listening on port {net['Server IP Port']}"
+            if net.get("Client IP Addresses"):
+                endpoint += f" for client {net['Client IP Addresses']}"
+
         devices.append({
             "name": device_name,
             "map_name": map_name or device_name,
@@ -148,6 +216,10 @@ def _parse_device(root: ET.Element, filename: str) -> Tuple[List[Dict], List[Dic
             "connection_type": connection_type,
             "manufacturer": manufacturer,
             "model": model,
+            "ip_address": device_ip,
+            "address_role": address_role,
+            "endpoint": endpoint,
+            "network": net,
             "_source_file": filename,
         })
 
