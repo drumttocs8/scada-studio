@@ -881,6 +881,219 @@ async def ask_rtac(
     }
 
 
+@router.get("/node-config", tags=["LLM API"])
+async def config_for_graph_node(
+    node_uri: str = Query(..., description="Graph node URI or mRID"),
+    substation: Optional[str] = Query(None, description="Narrow to one substation"),
+    q: Optional[str] = Query(None, description="Filter returned points by text"),
+    top_k: int = Query(50, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """Grounding for GraphRAG: what does the RTAC config say about THIS node?
+
+    A retrieval layer that silently returns nothing is the worst possible
+    behaviour here, because "no config data" and "this device is missing from
+    the config" are the same empty list but opposite conclusions -- the second
+    is a drift finding the engineer needs to see. So this never returns a bare
+    empty result: `status` always says which of the two it is, and `message`
+    says it in words the calling model can quote.
+
+      not_mapped   node has no device mapping yet
+      no_config    mapped, but no RTAC config is indexed for it
+      not_in_config  mapped to a device the current config does not contain
+      no_points    device is in the config but has no points mapped
+      ok           points found
+
+    It answers in every case rather than refusing when something is invalid.
+    Blocking on invalid state would hide exactly the drift the graph exists to
+    catch; callers that want strictness can act on `status` themselves.
+    """
+    from sqlalchemy import select, or_
+    from models import RtacConfig, DeviceMapping, Point
+
+    def envelope(status: str, message: str, **extra):
+        body = {
+            "node_uri": node_uri,
+            "status": status,
+            "message": message,
+            "has_config_data": status == "ok",
+            "mapping": None,
+            "config": None,
+            "device": None,
+            "point_count": 0,
+            "points": [],
+        }
+        body.update(extra)
+        return body
+
+    # ── 1. Node -> device mapping. Accept a URI from any profile. ──
+    stmt = select(DeviceMapping).where(
+        or_(
+            DeviceMapping.eq_uri == node_uri,
+            DeviceMapping.sc_device_uri == node_uri,
+            DeviceMapping.pe_relay_uri == node_uri,
+        )
+    )
+    if substation:
+        stmt = stmt.where(DeviceMapping.substation == substation)
+    mapping = (await db.execute(stmt)).scalars().first()
+
+    if mapping is None:
+        return envelope(
+            "not_mapped",
+            f"No RTAC device is mapped to node {node_uri!r}"
+            + (f" in substation {substation!r}" if substation else "")
+            + ". Map it on the SCADA Mapping tab before asking about its "
+              "configuration. This means the link is missing, not that the "
+              "device is absent from the RTAC config.",
+        )
+
+    map_info = {
+        "id": mapping.id,
+        "substation": mapping.substation,
+        "eq_name": mapping.eq_name,
+        "sc_device_name": mapping.sc_device_name,
+        "sc_map_name": mapping.sc_map_name,
+        "confidence": mapping.confidence,
+        "source": mapping.source,
+    }
+
+    # ── 2. Resolve the config: the one recorded on the mapping, else the
+    #       substation's current snapshot. ──
+    config = None
+    if mapping.config_id:
+        config = (await db.execute(
+            select(RtacConfig).where(RtacConfig.id == mapping.config_id)
+        )).scalar_one_or_none()
+    if config is None:
+        candidates = (await db.execute(
+            select(RtacConfig).order_by(RtacConfig.parsed_at.desc()).limit(50)
+        )).scalars().all()
+        sub = (mapping.substation or "").lower()
+        config = next(
+            (c for c in candidates
+             if ((c.metadata_ or {}).get("substation") or "").lower() == sub),
+            None,
+        )
+
+    if config is None:
+        return envelope(
+            "no_config",
+            f"Node {node_uri!r} is mapped to RTAC device "
+            f"{mapping.sc_map_name or mapping.sc_device_name!r}, but no RTAC "
+            f"configuration is indexed for substation {mapping.substation!r}. "
+            f"Sync the substation's repo on the SCADA Mapping tab.",
+            mapping=map_info,
+        )
+
+    meta = config.metadata_ or {}
+    config_info = {
+        "config_id": config.id,
+        "repo": config.repo,
+        "commit_sha": config.commit_sha,
+        "substation": meta.get("substation"),
+        "device_count": meta.get("device_count"),
+        "point_count": meta.get("point_count"),
+        "citation_url": _gitea_blob_url(config.repo, config.file_path, config.commit_sha),
+    }
+
+    # ── 3. Locate the device inside that config. ──
+    target = (mapping.sc_map_name or mapping.sc_device_name or "").strip()
+    device = next(
+        (d for d in meta.get("devices", [])
+         if target and target.lower() in {
+             str(d.get("map_name", "")).lower(),
+             str(d.get("device_name", "")).lower(),
+             str(d.get("name", "")).lower(),
+         }),
+        None,
+    )
+
+    if device is None:
+        # Mapped to something the config no longer has: real drift, not absence.
+        return envelope(
+            "not_in_config",
+            f"Node {node_uri!r} is mapped to RTAC device {target!r}, but that "
+            f"device is NOT present in the current config for "
+            f"{meta.get('substation')!r} (commit {config.commit_sha[:8]}, "
+            f"{meta.get('device_count', 0)} devices). Either the device was "
+            f"removed from the RTAC config or the mapping is stale -- this is a "
+            f"drift finding, not missing data.",
+            mapping=map_info,
+            config=config_info,
+            available_devices=[
+                d.get("map_name") or d.get("device_name") for d in meta.get("devices", [])
+            ][:50],
+        )
+
+    device_info = {
+        "name": device.get("device_name") or device.get("name"),
+        "map_name": device.get("map_name"),
+        "role": device.get("role"),
+        "protocol": device.get("protocol"),
+        "manufacturer": device.get("manufacturer"),
+        "model": device.get("model"),
+        "connection_type": device.get("connection_type"),
+        "source_file": device.get("_source_file"),
+    }
+
+    # ── 4. Points belonging to that device. ──
+    pstmt = select(Point).where(Point.config_id == config.id)
+    if q:
+        like = f"%{q}%"
+        pstmt = pstmt.where(
+            or_(Point.name.ilike(like), Point.description.ilike(like))
+        )
+    all_points = (await db.execute(pstmt)).scalars().all()
+
+    names = {v for v in (device.get("map_name"), device.get("device_name"),
+                         device.get("name")) if v}
+    lowered = {n.lower() for n in names}
+    points = [
+        p for p in all_points
+        if str((p.extra or {}).get("map_name", "")).lower() in lowered
+        or any(str(p.name or "").lower().startswith(n + ".") for n in lowered)
+    ]
+
+    if not points:
+        return envelope(
+            "no_points",
+            f"RTAC device {device_info['name']!r} "
+            f"({device_info['protocol']}, {device_info['role']}) exists in the "
+            f"config for {meta.get('substation')!r}, but has no points mapped to "
+            f"it"
+            + (f" matching {q!r}" if q else "")
+            + ". For a DNP server this usually means no outstation point map is "
+              "assigned; for a client it means no tags are enabled. The device "
+              "is configured, its point list is empty.",
+            mapping=map_info,
+            config=config_info,
+            device=device_info,
+        )
+
+    return envelope(
+        "ok",
+        f"{len(points)} point(s) configured on RTAC device "
+        f"{device_info['name']!r} for node {node_uri!r}.",
+        mapping=map_info,
+        config=config_info,
+        device=device_info,
+        point_count=len(points),
+        points=[
+            {
+                "name": p.name,
+                "address": p.address,
+                "point_type": p.point_type,
+                "data_type": p.data_type,
+                "description": p.description,
+                "source_tag": p.source_tag,
+                "destination_tag": p.destination_tag,
+            }
+            for p in points[:top_k]
+        ],
+    )
+
+
 @router.get("/llm/tools.json", tags=["LLM API"])
 async def llm_tool_manifest():
     """OpenAI-style function-calling manifest for the RTAC config API.
