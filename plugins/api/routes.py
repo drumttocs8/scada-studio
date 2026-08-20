@@ -900,6 +900,11 @@ async def ask_rtac(
 async def config_for_graph_node(
     node_uri: str = Query(..., description="Graph node URI or mRID"),
     substation: Optional[str] = Query(None, description="Narrow to one substation"),
+    device_name: Optional[str] = Query(
+        None,
+        description="RTAC device the node maps to, when the caller already "
+                    "resolved it (verance-graph reads it off the node).",
+    ),
     q: Optional[str] = Query(None, description="Filter returned points by text"),
     top_k: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
@@ -941,42 +946,62 @@ async def config_for_graph_node(
         body.update(extra)
         return body
 
-    # ── 1. Node -> device mapping. Accept a URI from any profile. ──
-    stmt = select(DeviceMapping).where(
-        or_(
-            DeviceMapping.eq_uri == node_uri,
-            DeviceMapping.sc_device_uri == node_uri,
-            DeviceMapping.pe_relay_uri == node_uri,
+    # ── 1. Node -> RTAC device.
+    #
+    # The mapping a person confirms on the SCADA Mapping tab is stored on the
+    # Neo4j node itself (ns1__rtacDeviceName), not in this service's
+    # device_mappings table -- the graph owns that link. So the normal path is
+    # verance-graph resolving it and passing device_name. The device_mappings
+    # lookup stays as a fallback for callers that recorded a mapping here.
+    mapping = None
+    if device_name:
+        map_info = {
+            "id": None,
+            "substation": substation,
+            "eq_name": None,
+            "sc_device_name": device_name,
+            "sc_map_name": device_name,
+            "confidence": 1.0,
+            "source": "graph_node",
+        }
+    else:
+        stmt = select(DeviceMapping).where(
+            or_(
+                DeviceMapping.eq_uri == node_uri,
+                DeviceMapping.sc_device_uri == node_uri,
+                DeviceMapping.pe_relay_uri == node_uri,
+            )
         )
-    )
-    if substation:
-        stmt = stmt.where(DeviceMapping.substation == substation)
-    mapping = (await db.execute(stmt)).scalars().first()
+        if substation:
+            stmt = stmt.where(DeviceMapping.substation == substation)
+        mapping = (await db.execute(stmt)).scalars().first()
 
-    if mapping is None:
-        return envelope(
-            "not_mapped",
-            f"No RTAC device is mapped to node {node_uri!r}"
-            + (f" in substation {substation!r}" if substation else "")
-            + ". Map it on the SCADA Mapping tab before asking about its "
-              "configuration. This means the link is missing, not that the "
-              "device is absent from the RTAC config.",
-        )
+        if mapping is None:
+            return envelope(
+                "not_mapped",
+                f"No RTAC device is mapped to node {node_uri!r}"
+                + (f" in substation {substation!r}" if substation else "")
+                + ". Map it on the SCADA Mapping tab before asking about its "
+                  "configuration. This means the link is missing, not that the "
+                  "device is absent from the RTAC config.",
+            )
 
-    map_info = {
-        "id": mapping.id,
-        "substation": mapping.substation,
-        "eq_name": mapping.eq_name,
-        "sc_device_name": mapping.sc_device_name,
-        "sc_map_name": mapping.sc_map_name,
-        "confidence": mapping.confidence,
-        "source": mapping.source,
-    }
+        map_info = {
+            "id": mapping.id,
+            "substation": mapping.substation,
+            "eq_name": mapping.eq_name,
+            "sc_device_name": mapping.sc_device_name,
+            "sc_map_name": mapping.sc_map_name,
+            "confidence": mapping.confidence,
+            "source": mapping.source,
+        }
 
     # ── 2. Resolve the config: the one recorded on the mapping, else the
     #       substation's current snapshot. ──
+    target = (map_info["sc_map_name"] or map_info["sc_device_name"] or "").strip()
+
     config = None
-    if mapping.config_id:
+    if mapping is not None and mapping.config_id:
         config = (await db.execute(
             select(RtacConfig).where(RtacConfig.id == mapping.config_id)
         )).scalar_one_or_none()
@@ -984,20 +1009,35 @@ async def config_for_graph_node(
         candidates = (await db.execute(
             select(RtacConfig).order_by(RtacConfig.parsed_at.desc()).limit(50)
         )).scalars().all()
-        sub = (mapping.substation or "").lower()
-        config = next(
-            (c for c in candidates
-             if ((c.metadata_ or {}).get("substation") or "").lower() == sub),
-            None,
-        )
+        sub = (map_info["substation"] or "").lower()
+        if sub:
+            config = next(
+                (c for c in candidates
+                 if ((c.metadata_ or {}).get("substation") or "").lower() == sub),
+                None,
+            )
+        if config is None and target:
+            # No substation given: find the config that actually contains this
+            # device rather than guessing at the newest one.
+            config = next(
+                (c for c in candidates
+                 if any(target.lower() in {
+                     str(d.get("map_name", "")).lower(),
+                     str(d.get("device_name", "")).lower(),
+                     str(d.get("name", "")).lower(),
+                 } for d in (c.metadata_ or {}).get("devices", []))),
+                None,
+            )
+        if config is None:
+            config = next(iter(candidates), None)
 
     if config is None:
         return envelope(
             "no_config",
-            f"Node {node_uri!r} is mapped to RTAC device "
-            f"{mapping.sc_map_name or mapping.sc_device_name!r}, but no RTAC "
-            f"configuration is indexed for substation {mapping.substation!r}. "
-            f"Sync the substation's repo on the SCADA Mapping tab.",
+            f"Node {node_uri!r} is mapped to RTAC device {target!r}, but no RTAC "
+            f"configuration is indexed"
+            + (f" for substation {map_info['substation']!r}" if map_info["substation"] else "")
+            + ". Sync the substation's repo on the SCADA Mapping tab.",
             mapping=map_info,
         )
 
@@ -1013,7 +1053,6 @@ async def config_for_graph_node(
     }
 
     # ── 3. Locate the device inside that config. ──
-    target = (mapping.sc_map_name or mapping.sc_device_name or "").strip()
     device = next(
         (d for d in meta.get("devices", [])
          if target and target.lower() in {
