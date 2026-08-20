@@ -15,6 +15,10 @@ class Settings(BaseSettings):
 
     # Gitea
     gitea_url: str = "http://localhost:3000"
+    # Browser-reachable Gitea origin, used only to build citation links. API
+    # calls go over the internal hostname, which a person clicking a citation
+    # cannot resolve; set this to the public URL so citations actually open.
+    gitea_public_url: str = ""
     gitea_token: str = ""
     # Optional narrowing filter for SCADA Mapping repo discovery. Empty by
     # default: configs are pushed by whichever engineer did the work, so

@@ -27,7 +27,7 @@ async def text_search(
             c.id AS config_id,
             c.repo,
             c.file_path,
-            p.name || COALESCE(' — ' || p.description, '') AS chunk_text,
+            p.name || COALESCE(' - ' || p.description, '') AS chunk_text,
             p.point_type AS chunk_type,
             c.device_name
         FROM points p
@@ -89,7 +89,9 @@ async def text_search(
                     config_id=r.config_id,
                     repo=r.repo,
                     file_path=r.file_path,
-                    chunk_text=f"{name} — {desc}",
+                    # ASCII separator: this text is quoted into LLM prompts and
+                    # rendered in consoles, where a stray em dash mojibakes.
+                    chunk_text=f"{name} - {desc}",
                     chunk_type="device",
                 ))
                 if len(results) >= top_k:

@@ -663,9 +663,24 @@ async def export_mappings(
 
 
 def _gitea_blob_url(repo: str, file_path: str, commit_sha: str | None = None) -> str:
-    """Build a Gitea blob URL for citation."""
+    """Build a browser-openable Gitea URL for citation.
+
+    Citations are handed to people and to LLM agents that quote them, so they
+    must use an origin a browser can resolve. The API talks to Gitea over
+    gitea.railway.internal, which resolves only inside the Railway network --
+    a citation built from it is dead on arrival. Prefer the configured public
+    origin, then the DB-stored one, and fall back to the API URL.
+    """
     from config import get_settings
-    base = get_settings().gitea_url.rstrip("/")
+    s = get_settings()
+    base = (s.gitea_public_url or "").rstrip("/")
+    if not base:
+        try:
+            from api.gitea_client import get_effective_gitea
+            base = (get_effective_gitea().get("url") or "").rstrip("/")
+        except Exception:
+            base = ""
+    base = base or s.gitea_url.rstrip("/")
     ref = commit_sha if commit_sha and commit_sha != "manual" else "main"
     return f"{base}/{repo}/src/commit/{ref}/{file_path}"
 
