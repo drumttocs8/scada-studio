@@ -1118,13 +1118,18 @@ async def list_gitea_repos(
     Returns repos plus, for each, the latest indexed RtacConfig (if any)
     so the UI can show which substations have already been parsed.
     """
-    from api.gitea_client import list_repos, get_effective_gitea
+    from api.gitea_client import list_repos, get_effective_gitea, GiteaAuthError
     from sqlalchemy import select, func
     from models import RtacConfig
 
+    # No owner means every repo the token can see, which is the normal case:
+    # substations are pushed by whichever engineer did the work.
     effective_owner = owner or get_effective_gitea().get("owner") or None
     try:
         repos = await list_repos(owner=effective_owner, limit=limit)
+    except GiteaAuthError as e:
+        # 401, not 502 — the instance answered fine, it refused our credentials.
+        raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gitea unreachable: {e}")
 
@@ -1204,8 +1209,19 @@ async def sync_gitea_repo(
         logger.exception(f"Resolve branch failed for {full_name}")
         raise HTTPException(status_code=502, detail=f"Gitea branch lookup failed: {type(e).__name__}: {e}")
 
+    # Config repos put the active RTAC export under xml/. Other folders hold
+    # XML that is emphatically not an RTAC config — cim/ holds a CIM RDF
+    # profile, which the parser would happily index as a config with zero
+    # devices and zero points. Prefer xml/, and only fall back to a whole-repo
+    # walk (minus cim/) for repos predating the layout.
     try:
-        files = await list_repo_files(full_name, path_prefix="", ref=branch)
+        files = await list_repo_files(full_name, path_prefix="xml/", ref=branch)
+        if not files:
+            files = [
+                f
+                for f in await list_repo_files(full_name, path_prefix="", ref=branch)
+                if not f["path"].lower().startswith("cim/")
+            ]
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gitea list failed: {e}")
 

@@ -16,7 +16,10 @@ class Settings(BaseSettings):
     # Gitea
     gitea_url: str = "http://localhost:3000"
     gitea_token: str = ""
-    gitea_owner: str = "drumttocs8"  # default user/org for SCADA Mapping repo discovery
+    # Optional narrowing filter for SCADA Mapping repo discovery. Empty by
+    # default: configs are pushed by whichever engineer did the work, so
+    # scoping discovery to one account hides other people's substations.
+    gitea_owner: str = ""
 
     # External Verance services (RAG/embeddings handled by n8n)
     n8n_webhook_url: str = "https://n8n-g8qm-production.up.railway.app"

@@ -173,13 +173,18 @@ async def list_repo_files(
     return out
 
 
+class GiteaAuthError(RuntimeError):
+    """The Gitea token was missing or rejected."""
+
+
 async def list_repos(owner: str | None = None, limit: int = 50, cfg: dict | None = None) -> list[dict]:
     """
     List Gitea repositories visible to the configured token.
 
-    - If `owner` is empty/None, returns all repos accessible to the token
-      (via /repos/search).
-    - If `owner` is set, tries /users/{owner}/repos then /orgs/{owner}/repos.
+    Every repo on the instance is one substation's RTAC, and configs are pushed
+    by whoever did the engineering, so the default is to list *everything* the
+    token can see rather than one account's repos. `owner` is an optional
+    narrowing filter, not the normal path.
 
     `cfg` lets the connection-test endpoint probe with unsaved values
     without affecting the runtime cache.
@@ -196,6 +201,7 @@ async def list_repos(owner: str | None = None, limit: int = 50, cfg: dict | None
             f"{base}/api/v1/orgs/{owner}/repos",
         ]
     else:
+        # /repos/search returns everything the token can read, across all owners.
         candidate_urls = [f"{base}/api/v1/repos/search"]
 
     out: list[dict] = []
@@ -205,20 +211,31 @@ async def list_repos(owner: str | None = None, limit: int = 50, cfg: dict | None
         for u in candidate_urls:
             probe = await client.get(u, headers=headers, params={"limit": 1, "page": 1})
             last_probe = probe
+            # An auth failure is never "no repos here" — say so plainly rather
+            # than letting it read as a bad owner filter.
+            if probe.status_code in (401, 403):
+                raise GiteaAuthError(
+                    f"Gitea rejected the access token ({probe.status_code}). "
+                    f"Check the token in Settings - it may be expired, revoked, "
+                    f"or missing the 'repo' scope."
+                )
             if probe.status_code == 200:
                 url = u
                 break
         if url is None:
-            # Surface a helpful error
             status = last_probe.status_code if last_probe is not None else 0
             detail = ""
             try:
                 detail = last_probe.text[:200] if last_probe is not None else ""
             except Exception:
                 pass
-            raise RuntimeError(
-                f"No repos found for owner={owner!r}: last probe {status} {detail}"
-            )
+            if owner:
+                raise RuntimeError(
+                    f"No Gitea user or organisation named {owner!r} "
+                    f"(probe returned {status}). Clear the Default Owner field to "
+                    f"list every repo the token can see. {detail}"
+                )
+            raise RuntimeError(f"Gitea repo search failed ({status}). {detail}")
 
         params: dict = {"limit": limit, "page": 1}
         while True:
