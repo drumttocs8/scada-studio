@@ -2,6 +2,8 @@
 API routes — ties together all plugin modules.
 """
 
+import json
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from database import get_db
 from rtac_plg.parser import parse_rtac_xml_bytes, extract_points
-from rag.indexer import index_config
+from rag.indexer import index_config, index_repo_snapshot
 from rag.search import text_search
 from similar_configs.finder import find_similar
 from api.schemas import (
@@ -344,6 +346,7 @@ async def gitea_push_webhook(
 
     indexed = []
     profiles_generated = []
+    touched_xml: set[str] = set()
 
     for commit in payload.commits:
         # Skip bot commits to prevent infinite webhook loops
@@ -356,18 +359,16 @@ async def gitea_push_webhook(
             if f.startswith("xml/") and f.endswith(".xml")
         ]
 
+        # Indexing is per-repo, not per-file: a substation's devices are spread
+        # across many files, and the topology validator needs all of them in one
+        # config. Handled once after this loop.
+        touched_xml.update(xml_files)
+
         for fpath in xml_files:
             try:
                 content = await fetch_file_from_gitea(repo, fpath, commit_sha)
 
-                # 1. Index for RAG search
-                config_id = await index_config(
-                    db, content, repo=repo, file_path=fpath,
-                    commit_sha=commit_sha, filename=fpath,
-                )
-                indexed.append({"file": fpath, "config_id": config_id})
-
-                # 2. Generate SC profile from RTAC XML
+                # Generate SC profile from RTAC XML
                 sc_result = await _generate_and_store_sc_profile(
                     repo=repo,
                     xml_content=content,
@@ -382,10 +383,44 @@ async def gitea_push_webhook(
                 logger.warning(f"Failed to process {fpath}: {e}")
                 indexed.append({"file": fpath, "error": str(e)})
 
+    # Re-index the whole xml/ tree as one config whenever any of it changed.
+    # Indexing only the changed files would leave a config describing a
+    # fraction of the substation, which the validator would read as devices
+    # having been removed.
+    snapshot = None
+    if touched_xml:
+        try:
+            from api.gitea_client import list_repo_files
+
+            entries = await list_repo_files(repo, path_prefix="xml/", ref=commit_sha)
+            files = [
+                (e["path"], await fetch_file_from_gitea(repo, e["path"], ref=commit_sha))
+                for e in entries
+            ]
+            xml_tree_sha256 = None
+            try:
+                raw = await fetch_file_from_gitea(repo, "active.json", ref=commit_sha)
+                xml_tree_sha256 = json.loads(raw.decode("utf-8")).get("xml_tree_sha256")
+            except Exception:
+                pass
+            snapshot = await index_repo_snapshot(
+                db, repo=repo, commit_sha=commit_sha,
+                files=files, xml_tree_sha256=xml_tree_sha256,
+            )
+            indexed.append({"snapshot": snapshot})
+        except Exception as e:
+            logger.exception(f"Snapshot index failed for {repo}@{commit_sha}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            indexed.append({"snapshot_error": f"{type(e).__name__}: {e}"})
+
     return {
         "repo": repo,
         "commit": commit_sha,
         "indexed": indexed,
+        "snapshot": snapshot,
         "profiles_generated": profiles_generated,
     }
 
@@ -1196,6 +1231,7 @@ async def sync_gitea_repo(
     headers = {}
     if cfg.get("token"):
         headers["Authorization"] = f"token {cfg['token']}"
+    head_sha = None
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             meta = await client.get(f"{cfg['url']}/api/v1/repos/{full_name}", headers=headers)
@@ -1203,6 +1239,11 @@ async def sync_gitea_repo(
                 raise HTTPException(status_code=404, detail=f"Repo not found: {full_name}")
             meta.raise_for_status()
             branch = meta.json().get("default_branch") or "main"
+            # The snapshot is identified by the branch head, not by per-file
+            # blob shas, because the config being indexed is the whole tree.
+            br = await client.get(f"{cfg['url']}/api/v1/repos/{full_name}/branches/{branch}", headers=headers)
+            if br.status_code == 200:
+                head_sha = (br.json().get("commit") or {}).get("id")
     except HTTPException:
         raise
     except Exception as e:
@@ -1225,59 +1266,93 @@ async def sync_gitea_repo(
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gitea list failed: {e}")
 
-    indexed: list[dict] = []
-    skipped: list[dict] = []
+    snapshot_sha = head_sha or branch
+
+    # Already at this commit? Nothing to do.
+    if not force:
+        existing = (
+            await db.execute(
+                select(RtacConfig)
+                .where(RtacConfig.repo == full_name)
+                .where(RtacConfig.commit_sha == snapshot_sha)
+                .where(RtacConfig.file_path == "xml/")
+            )
+        ).scalar_one_or_none()
+        if existing:
+            meta = existing.metadata_ or {}
+            return {
+                "repo": full_name,
+                "branch": branch,
+                "commit_sha": snapshot_sha,
+                "config_id": existing.id,
+                "skipped": True,
+                "summary": {
+                    "devices": meta.get("device_count", 0),
+                    "points": meta.get("point_count", 0),
+                    "files_parsed": meta.get("file_count", 0),
+                },
+            }
+
+    # Fetch every file, then index the tree as one config. A substation's
+    # devices are spread across many files; only the whole set is meaningful
+    # to diff against a graph model.
     errors: list[dict] = []
+    payload: list[tuple[str, bytes]] = []
     for entry in files:
         fpath = entry["path"]
         try:
-            existing = (
-                await db.execute(
-                    select(RtacConfig)
-                    .where(RtacConfig.repo == full_name)
-                    .where(RtacConfig.file_path == fpath)
-                    .where(RtacConfig.commit_sha == entry["sha"])
-                )
-            ).scalar_one_or_none()
-            if existing and not force:
-                skipped.append({"file": fpath, "config_id": existing.id})
-                continue
-            content = await fetch_file_from_gitea(full_name, fpath, ref=branch)
-            cfg_id = await index_config(
-                db,
-                content,
-                repo=full_name,
-                file_path=fpath,
-                commit_sha=entry["sha"],
-                filename=fpath.split("/")[-1],
-            )
-            indexed.append({"file": fpath, "config_id": cfg_id})
+            payload.append((fpath, await fetch_file_from_gitea(full_name, fpath, ref=branch)))
         except Exception as e:
-            logger.exception(f"Sync failed for {full_name}/{fpath}")
+            logger.exception(f"Fetch failed for {full_name}/{fpath}")
             errors.append({"file": fpath, "error": f"{type(e).__name__}: {e}"})
-            # Roll back any partial work so the session stays usable for the next file
-            try:
-                await db.rollback()
-            except Exception:
-                pass
+
+    if not payload:
+        raise HTTPException(
+            status_code=502,
+            detail=f"No XML could be fetched from {full_name}: {errors[:3]}",
+        )
+
+    # Read the tree fingerprint the pusher recorded, when present. It changes
+    # exactly when the config does, so it is the honest identity for a
+    # snapshot; the commit sha also moves for unrelated edits (README, etc).
+    xml_tree_sha256 = None
+    try:
+        raw = await fetch_file_from_gitea(full_name, "active.json", ref=branch)
+        xml_tree_sha256 = json.loads(raw.decode("utf-8")).get("xml_tree_sha256")
+    except Exception:
+        pass  # Pre-dates active.json, or repo does not use scada-push.
 
     try:
-        await db.commit()
+        result = await index_repo_snapshot(
+            db,
+            repo=full_name,
+            commit_sha=snapshot_sha,
+            files=payload,
+            xml_tree_sha256=xml_tree_sha256,
+        )
     except Exception as e:
-        logger.exception(f"Final commit failed for {full_name}")
+        logger.exception(f"Snapshot index failed for {full_name}")
         try:
             await db.rollback()
         except Exception:
             pass
-        errors.append({"file": "<commit>", "error": f"{type(e).__name__}: {e}"})
+        raise HTTPException(status_code=500, detail=f"Indexing failed: {type(e).__name__}: {e}")
 
+    errors.extend(result.get("errors") or [])
     return {
         "repo": full_name,
         "branch": branch,
-        "indexed": indexed,
-        "skipped": skipped,
+        "commit_sha": snapshot_sha,
+        "xml_tree_sha256": xml_tree_sha256,
+        "config_id": result["config_id"],
+        "replaced_configs": result["replaced"],
         "errors": errors,
-        "summary": {"indexed": len(indexed), "skipped": len(skipped), "errors": len(errors)},
+        "summary": {
+            "devices": result["devices"],
+            "points": result["points"],
+            "files_parsed": result["files_parsed"],
+            "errors": len(errors),
+        },
     }
 
 
